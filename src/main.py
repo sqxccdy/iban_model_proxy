@@ -1,8 +1,11 @@
 import os
 import time
 import json
+import logging
 from redis.asyncio import Redis
 from aiohttp import web, ClientSession, ClientTimeout
+
+logging.basicConfig(level=logging.INFO)
 
 API_KEY = os.environ['MODEL_API_KEY']
 BASE_URL = os.environ['MODEL_BASE_URL']
@@ -122,7 +125,10 @@ async def chat(request):
                 return web.json_response(result)
 
             # 流式逻辑完全不变
-            response = web.StreamResponse(status=resp.status, headers={"Content-Type": "text/event-stream"})
+            response = web.StreamResponse(
+                status=resp.status,
+                headers={"Content-Type": "text/event-stream; charset=utf-8"},
+            )
             await response.prepare(request)
 
             last_usage = None
@@ -151,7 +157,9 @@ async def chat(request):
 
 
 async def events(request):
-    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+    resp = web.StreamResponse(
+        headers={"Content-Type": "text/event-stream; charset=utf-8"}
+    )
     await resp.prepare(request)
 
     pubsub = request.app["redis"].pubsub()
@@ -186,4 +194,4 @@ app.on_startup.append(startup)
 app.on_cleanup.append(cleanup)
 
 if __name__ == "__main__":
-    web.run_app(app, port=8080)
+    web.run_app(app, port=8080, access_log=logging.getLogger("aiohttp.access"))
