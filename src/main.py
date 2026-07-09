@@ -3,6 +3,7 @@ import time
 import json
 import logging
 from redis.asyncio import Redis
+from redis.exceptions import WatchError
 from aiohttp import web, ClientSession, ClientTimeout
 
 logging.basicConfig(level=logging.INFO)
@@ -15,10 +16,41 @@ BROADCAST_CHANNEL = "conn:events"
 SUCCESS_COUNT_KEY = "llm:stats:success"
 FAIL_COUNT_KEY = "llm:stats:fail"
 TOTAL_TOKENS_KEY = "llm:stats:tokens"
+STATS_MONTH_KEY = "llm:stats:month"
 REALTIME_STATS_CHANNEL = "llm:stats:realtime"
 
 
+def get_current_stats_month() -> str:
+    return time.strftime("%Y-%m", time.localtime())
+
+
+async def ensure_monthly_stats(redis):
+    current_month = get_current_stats_month()
+
+    while True:
+        try:
+            async with redis.pipeline() as pipe:
+                await pipe.watch(STATS_MONTH_KEY)
+                stats_month = await pipe.get(STATS_MONTH_KEY)
+
+                if stats_month == current_month:
+                    await pipe.reset()
+                    return
+
+                pipe.multi()
+                pipe.set(STATS_MONTH_KEY, current_month)
+                pipe.set(SUCCESS_COUNT_KEY, 0)
+                pipe.set(FAIL_COUNT_KEY, 0)
+                pipe.set(TOTAL_TOKENS_KEY, 0)
+                await pipe.execute()
+                return
+        except WatchError:
+            continue
+
+
 async def update_stats(redis, success: bool, tokens: int = 0):
+    await ensure_monthly_stats(redis)
+
     pipe = redis.pipeline()
     pipe.incr(SUCCESS_COUNT_KEY) if success else pipe.incr(FAIL_COUNT_KEY)
     if tokens > 0:

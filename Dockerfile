@@ -1,7 +1,7 @@
 # Author: Mason sun
 # Create Datetime: 2026-07-09
 # Build: docker build -f Dockerfile --platform=linux/amd64 -t origin-hub-ai-registry.cn-shanghai.cr.aliyuncs.com/dataflow/model_proxy:v1.0.0 .
-FROM library/python:3.12-slim
+FROM library/python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -13,8 +13,7 @@ WORKDIR /app
 
 COPY ./requirements.txt ./
 COPY ./src ./src
-COPY ./models ./models
 RUN pip3 install -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple/
 
-CMD ["gunicorn", "-w", "2", "-k", "aiohttp.GunicornWebWorker", "-b", "0.0.0.0:8000", "--access-logfile", "-", "--error-logfile", "-", "src.main:app"]
+CMD ["gunicorn", "-w", "4", "-k", "aiohttp.GunicornWebWorker", "-b", "0.0.0.0:8000", "--access-logfile", "-", "--error-logfile", "-", "src.main:app"]
 #CMD ["tail", "-f", "/dev/null"]

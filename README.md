@@ -126,6 +126,7 @@ Content-Type: text/event-stream
 - `llm:stats:success`
 - `llm:stats:fail`
 - `llm:stats:tokens`
+- `llm:stats:month`：当前统计所属月份，格式 `YYYY-MM`，跨月时会自动清空统计
 
 ## 本地运行
 
