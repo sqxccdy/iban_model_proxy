@@ -90,7 +90,9 @@ async def conn_broadcast_middleware(request, handler):
         if request.path == "/v1/chat/completions":
             if "deepseek" in proxy_req["model"]:
                 proxy_req["model"] = MODEL_NAME
-            elif proxy_req["model"] == "gpt-4o-mini":
+            if "qwen3" in proxy_req["model"]:
+                proxy_req["model"] = MODEL_NAME
+            elif "gpt-4o" in proxy_req["model"]:
                 proxy_req["model"] = MODEL_NAME
         elif request.path == "/v1/embeddings":
             proxy_req["model"] = EMBEDDING_NAME
