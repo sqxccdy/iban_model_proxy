@@ -117,6 +117,10 @@ def resolve_model_route(request_path: str, request_model: str | None) -> tuple[d
     return route, None, None
 
 
+def build_json_preview(payload) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def get_current_stats_month() -> str:
     return time.strftime("%Y-%m", time.localtime())
 
@@ -168,8 +172,7 @@ async def update_stats(redis, success: bool, tokens: int = 0):
     }, ensure_ascii=False))
 
 
-async def publish_proxy_error(
-        redis,
+def attach_proxy_error(
         request,
         upstream_path: str,
         error_message: str,
@@ -177,17 +180,10 @@ async def publish_proxy_error(
         stage: str,
         status: int,
 ):
-    await redis.publish(BROADCAST_CHANNEL, json.dumps({
-        "type": "proxy_error",
-        "conn_id": request.get("conn_id"),
-        "remote": request.remote,
-        "path": request.path,
-        "upstream_path": upstream_path,
-        "stage": stage,
-        "status": status,
-        "error": error_message,
-        "ts": int(time.time() * 1000)
-    }, ensure_ascii=False))
+    request["close_error"] = error_message
+    request["close_error_stage"] = stage
+    request["close_error_status"] = status
+    request["close_upstream_path"] = upstream_path
 
 
 @web.middleware
@@ -224,7 +220,11 @@ async def conn_broadcast_middleware(request, handler):
             "conn_id": conn_id,
             "remote": request.remote,
             "path": request.path,
-            "status": status,
+            "status": request.get("close_error_status", status),
+            "stage": request.get("close_error_stage"),
+            "error": request.get("close_error"),
+            "upstream_path": request.get("close_upstream_path"),
+            "response_preview": request.get("response_preview"),
             "cost_ms": int((time.time() - start_ts) * 1000),
             "ts": int(time.time() * 1000)
         }, ensure_ascii=False))
@@ -241,8 +241,7 @@ async def proxy_json_request(request, upstream_path: str):
         proxy_req.get("model"),
     )
     if route_error:
-        await publish_proxy_error(
-            request.app["redis"],
+        attach_proxy_error(
             request,
             upstream_path,
             route_error,
@@ -264,8 +263,7 @@ async def proxy_json_request(request, upstream_path: str):
         ) as resp:
             if resp.status != 200:
                 error_message = f"LLM API Error: {await resp.text()}"
-                await publish_proxy_error(
-                    request.app["redis"],
+                attach_proxy_error(
                     request,
                     upstream_path,
                     error_message,
@@ -284,8 +282,7 @@ async def proxy_json_request(request, upstream_path: str):
                 except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
                     response_text = await resp.text()
                     error_message = f"Response parse error: {response_text or str(exc)}"
-                    await publish_proxy_error(
-                        request.app["redis"],
+                    attach_proxy_error(
                         request,
                         upstream_path,
                         error_message,
@@ -294,6 +291,8 @@ async def proxy_json_request(request, upstream_path: str):
                     )
                     await update_stats(request.app["redis"], success=False)
                     return web.json_response({"error": error_message}, status=502)
+                if request.path == "/v1/chat/completions":
+                    request["response_preview"] = build_json_preview(result)
                 await update_stats(
                     request.app["redis"],
                     success=True,
@@ -309,6 +308,7 @@ async def proxy_json_request(request, upstream_path: str):
             await response.prepare(request)
 
             last_usage = None
+            stream_preview_parts = []
             async for chunk in resp.content:
                 chunk_str = chunk.decode("utf-8", errors="ignore")
                 if "data: " in chunk_str and "[DONE]" not in chunk_str:
@@ -316,10 +316,18 @@ async def proxy_json_request(request, upstream_path: str):
                         payload = json.loads(chunk_str.split("data: ")[-1].strip())
                         if "usage" in payload:
                             last_usage = payload["usage"]
+                        if request.path == "/v1/chat/completions":
+                            for choice in payload.get("choices", []):
+                                delta = choice.get("delta", {})
+                                content = delta.get("content")
+                                if isinstance(content, str):
+                                    stream_preview_parts.append(content)
                     except (json.JSONDecodeError, KeyError):
                         pass
                 await response.write(chunk)
 
+            if request.path == "/v1/chat/completions" and stream_preview_parts:
+                request["response_preview"] = "".join(stream_preview_parts)
             await update_stats(
                 request.app["redis"],
                 success=True,
@@ -329,8 +337,7 @@ async def proxy_json_request(request, upstream_path: str):
             return response
 
     except Exception as exc:
-        await publish_proxy_error(
-            request.app["redis"],
+        attach_proxy_error(
             request,
             upstream_path,
             f"Internal error: {str(exc)}",

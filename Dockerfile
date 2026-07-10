@@ -12,7 +12,6 @@ RUN mkdir -p /app
 WORKDIR /app
 
 COPY ./requirements.txt ./
-COPY ./model.yaml ./
 COPY ./src ./src
 RUN pip3 install -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple/
 

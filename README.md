@@ -180,13 +180,12 @@ Content-Type: text/event-stream
 - `conn_open`：连接打开事件
 - `conn_close`：连接关闭事件
 - `stats_update`：实时统计更新
-- `proxy_error`：代理转发或响应解析出错时的错误事件
 
 补充字段：
 
 - `conn_open` 和 `conn_close` 都会带 `conn_id`，便于前端准确跟踪当前活跃连接
-- `proxy_error` 会带 `stage`、`status` 和 `error`，用于定位上游报错或响应解析失败
-- 如果 `model` 未配置，或请求到了错误的接口类型，也会通过 `proxy_error` 广播出来
+- 当代理转发、模型路由或响应解析出错时，错误信息会直接挂在 `conn_close` 上
+- 出错时 `conn_close` 会额外带 `stage`、`error` 和 `upstream_path`
 
 ### `GET /monitor`
 

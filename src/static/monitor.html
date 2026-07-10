@@ -577,16 +577,23 @@
       }
 
       if (payload.type === "conn_close") {
+        if (payload.error) {
+          state.errorCount += 1;
+        }
         pushEvent({
-          title: "连接关闭",
+          title: payload.error ? "连接关闭（错误）" : "连接关闭",
           ts: payload.ts,
-          summary: `${payload.path} 已结束`,
+          summary: payload.error || `${payload.path} 已结束`,
           details: [
             { label: "Conn ID", value: payload.conn_id },
             { label: "Remote", value: payload.remote || "-" },
             { label: "Status", value: payload.status },
             { label: "Cost", value: `${payload.cost_ms}ms` }
-          ]
+          ].concat(payload.error ? [
+            { label: "Stage", value: payload.stage || "-" },
+            { label: "Upstream", value: payload.upstream_path || "-" }
+          ] : []),
+          raw: payload.response_preview || ""
         });
       }
 
@@ -602,22 +609,6 @@
             { label: "Success", value: state.stats.successCount },
             { label: "Fail", value: state.stats.failCount },
             { label: "Tokens", value: state.stats.totalTokens }
-          ]
-        });
-      }
-
-      if (payload.type === "proxy_error") {
-        state.errorCount += 1;
-        pushEvent({
-          title: "代理错误",
-          ts: payload.ts,
-          summary: payload.error,
-          details: [
-            { label: "Conn ID", value: payload.conn_id },
-            { label: "Path", value: payload.path },
-            { label: "Stage", value: payload.stage },
-            { label: "Status", value: payload.status },
-            { label: "Upstream", value: payload.upstream_path }
           ]
         });
       }
