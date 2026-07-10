@@ -22,10 +22,9 @@ services:
     hostname: model_proxy
     environment:
         REDIS_URL: redis://model-redis:6379
-    env_file:
-      - .env
     volumes:
       - ./volumes:/data
+      - ./model.yaml:/app/model.yaml:ro
     depends_on:
       model-redis:
         condition: service_healthy

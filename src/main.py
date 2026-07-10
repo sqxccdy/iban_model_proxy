@@ -6,24 +6,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import aiohttp
+import yaml
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 from aiohttp import web, ClientSession, ClientTimeout
-from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
-
-load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
-
-MODEL_API_KEY = os.environ['MODEL_API_KEY']
-MODEL_BASE_URL = os.environ['MODEL_BASE_URL']
-MODEL_NAME = os.environ['MODEL_NAME']
-
-EMBEDDING_BASE_URL = os.environ['EMBEDDING_BASE_URL']
-EMBEDDING_API_KEY = os.environ['EMBEDDING_API_KEY']
-EMBEDDING_NAME = os.environ['EMBEDDING_NAME']
-
-REDIS_URL = os.environ['REDIS_URL']
 
 BROADCAST_CHANNEL = "conn:events"
 SUCCESS_COUNT_KEY = "llm:stats:success"
@@ -33,6 +21,100 @@ STATS_MONTH_KEY = "llm:stats:month"
 REALTIME_STATS_CHANNEL = "llm:stats:realtime"
 PROXY_REQUEST_PATHS = {"/v1/chat/completions", "/v1/embeddings"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "model.yaml"
+DEFAULT_REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+
+
+def normalize_model_style(style: str | None) -> str | None:
+    style_map = {
+        "openai": "chat",
+        "chat": "chat",
+        "completion": "chat",
+        "completions": "chat",
+        "embedding": "embedding",
+        "embeddings": "embedding",
+        "embdding": "embedding",
+    }
+    return style_map.get((style or "").strip().lower())
+
+
+def load_model_config() -> dict:
+    if not CONFIG_PATH.exists():
+        raise RuntimeError(f"Missing config file: {CONFIG_PATH}")
+
+    with CONFIG_PATH.open("r", encoding="utf-8") as file:
+        raw_config = yaml.safe_load(file) or {}
+
+    if not isinstance(raw_config, dict):
+        raise RuntimeError("model.yaml must be a mapping")
+
+    redis_url = raw_config.get("redis_url", DEFAULT_REDIS_URL)
+    raw_models = raw_config.get("models", raw_config)
+
+    if not isinstance(raw_models, dict) or not raw_models:
+        raise RuntimeError("model.yaml must define at least one model")
+
+    models = {}
+    for request_model, model_config in raw_models.items():
+        if request_model == "redis_url":
+            continue
+
+        if not isinstance(model_config, dict):
+            raise RuntimeError(f"Invalid config for model '{request_model}'")
+
+        api_key = model_config.get("api_key")
+        base_url = model_config.get("base_url")
+        style = normalize_model_style(model_config.get("style"))
+        upstream_model = model_config.get("upstream_model") or request_model
+
+        if not api_key:
+            raise RuntimeError(f"Model '{request_model}' missing api_key")
+        if not base_url:
+            raise RuntimeError(f"Model '{request_model}' missing base_url")
+        if not style:
+            raise RuntimeError(
+                f"Model '{request_model}' has invalid style '{model_config.get('style')}'"
+            )
+
+        models[request_model] = {
+            "api_key": api_key,
+            "base_url": str(base_url).rstrip("/"),
+            "style": style,
+            "upstream_model": upstream_model,
+        }
+
+    return {
+        "redis_url": redis_url,
+        "models": models,
+    }
+
+
+MODEL_CONFIG = load_model_config()
+REDIS_URL = MODEL_CONFIG["redis_url"]
+MODEL_ROUTES = MODEL_CONFIG["models"]
+
+
+def get_expected_route_style(request_path: str) -> str:
+    if request_path == "/v1/chat/completions":
+        return "chat"
+    if request_path == "/v1/embeddings":
+        return "embedding"
+    raise ValueError(f"Unsupported request path: {request_path}")
+
+
+def resolve_model_route(request_path: str, request_model: str | None) -> tuple[dict | None, str | None, int | None]:
+    if not request_model:
+        return None, "Missing required field: model", 400
+
+    route = MODEL_ROUTES.get(request_model)
+    if not route:
+        return None, f"Unknown model: {request_model}", 404
+
+    expected_style = get_expected_route_style(request_path)
+    if route["style"] != expected_style:
+        return None, f"Model '{request_model}' is not available for {request_path}", 400
+
+    return route, None, None
 
 
 def get_current_stats_month() -> str:
@@ -119,15 +201,6 @@ async def conn_broadcast_middleware(request, handler):
     # 只处理代理接口的请求，提前缓存请求体并强制模型
     if request.path in PROXY_REQUEST_PATHS and request.method == "POST":
         proxy_req = await request.json()
-        if request.path == "/v1/chat/completions":
-            if "deepseek" in proxy_req["model"]:
-                proxy_req["model"] = MODEL_NAME
-            if "qwen3" in proxy_req["model"]:
-                proxy_req["model"] = MODEL_NAME
-            elif "gpt-4o-mini" in proxy_req["model"]:
-                proxy_req["model"] = MODEL_NAME
-        elif request.path == "/v1/embeddings":
-            proxy_req["model"] = EMBEDDING_NAME
         request["proxy_req"] = proxy_req
 
     await redis.publish(BROADCAST_CHANNEL, json.dumps({
@@ -158,17 +231,35 @@ async def conn_broadcast_middleware(request, handler):
     return resp
 
 
-async def proxy_json_request(request, upstream_path: str, base_url: str, api_key: str):
+async def proxy_json_request(request, upstream_path: str):
     proxy_req = request.get("proxy_req")
     if not proxy_req:
         return web.json_response({"error": "Invalid request"}, status=400)
 
+    route, route_error, route_status = resolve_model_route(
+        request.path,
+        proxy_req.get("model"),
+    )
+    if route_error:
+        await publish_proxy_error(
+            request.app["redis"],
+            request,
+            upstream_path,
+            route_error,
+            stage="model_route",
+            status=route_status,
+        )
+        await update_stats(request.app["redis"], success=False)
+        return web.json_response({"error": route_error}, status=route_status)
+
+    upstream_req = dict(proxy_req)
+    upstream_req["model"] = route["upstream_model"]
     session = request.app["client_session"]
     try:
         async with session.post(
-                f"{base_url}{upstream_path}",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=proxy_req,
+                f"{route['base_url']}{upstream_path}",
+                headers={"Authorization": f"Bearer {route['api_key']}", "Content-Type": "application/json"},
+                json=upstream_req,
                 timeout=ClientTimeout(total=300)
         ) as resp:
             if resp.status != 200:
@@ -187,7 +278,7 @@ async def proxy_json_request(request, upstream_path: str, base_url: str, api_key
                     status=resp.status
                 )
 
-            if not proxy_req.get("stream"):
+            if not upstream_req.get("stream"):
                 try:
                     result = await resp.json()
                 except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
@@ -251,21 +342,11 @@ async def proxy_json_request(request, upstream_path: str, base_url: str, api_key
 
 
 async def chat(request):
-    return await proxy_json_request(
-        request,
-        "/v1/chat/completions",
-        MODEL_BASE_URL,
-        MODEL_API_KEY,
-    )
+    return await proxy_json_request(request, "/v1/chat/completions")
 
 
 async def embeddings(request):
-    return await proxy_json_request(
-        request,
-        "/v1/embeddings",
-        EMBEDDING_BASE_URL,
-        EMBEDDING_API_KEY,
-    )
+    return await proxy_json_request(request, "/v1/embeddings")
 
 
 async def events(request):

@@ -200,7 +200,7 @@
     .grid {
       display: grid;
       gap: 18px;
-      grid-template-columns: 1.25fr 0.75fr;
+      grid-template-columns: 1fr;
     }
 
     .panel {
@@ -219,43 +219,6 @@
       color: var(--muted);
       font-size: 14px;
       line-height: 1.5;
-    }
-
-    .table-wrap {
-      overflow: auto;
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      background: rgba(255, 255, 255, 0.48);
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      min-width: 760px;
-    }
-
-    th,
-    td {
-      text-align: left;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--line);
-      vertical-align: top;
-      font-size: 14px;
-    }
-
-    th {
-      position: sticky;
-      top: 0;
-      background: var(--panel-strong);
-      color: var(--muted);
-      font-size: 12px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      z-index: 1;
-    }
-
-    tbody tr:last-child td {
-      border-bottom: none;
     }
 
     .badge {
@@ -278,15 +241,15 @@
       padding: 0;
       margin: 0;
       display: grid;
-      gap: 10px;
-      max-height: 700px;
+      gap: 14px;
+      max-height: 920px;
       overflow: auto;
     }
 
     .event-item {
       border: 1px solid var(--line);
       border-radius: 16px;
-      padding: 14px;
+      padding: 16px;
       background: rgba(255, 255, 255, 0.52);
     }
 
@@ -316,6 +279,58 @@
       word-break: break-word;
     }
 
+    .event-summary {
+      margin-bottom: 10px;
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.65;
+      word-break: break-word;
+    }
+
+    .event-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px 12px;
+      margin-bottom: 10px;
+    }
+
+    .event-detail {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(47, 36, 24, 0.04);
+      border: 1px solid rgba(47, 36, 24, 0.08);
+    }
+
+    .event-label {
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .event-value {
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
+    .event-raw {
+      margin-top: 10px;
+      padding: 12px;
+      border-radius: 14px;
+      background: #2b2118;
+      color: #f7efe3;
+      font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
+    }
+
     .empty {
       padding: 28px;
       text-align: center;
@@ -333,6 +348,10 @@
 
       .cards {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .event-detail-grid {
+        grid-template-columns: 1fr;
       }
     }
 
@@ -360,7 +379,7 @@
         <div class="eyebrow">Realtime SSE Monitor</div>
         <h1>连接监控<br>一眼看清</h1>
         <p class="subtext">
-          这个页面会直接订阅 <span class="mono">/events</span>，实时更新当前连接、成功失败次数和 token 统计。
+          这个页面会直接订阅 <span class="mono">/events</span>，实时更新错误、成功失败次数和 token 统计。
           页面刷新后会重新建立订阅，不依赖额外接口。
         </p>
       </div>
@@ -376,8 +395,8 @@
           <div class="muted" id="lastEventTime">尚未收到事件</div>
         </div>
         <div>
-          <div class="status-label">当前活跃连接</div>
-          <div class="big-number" id="liveCount">0</div>
+          <div class="status-label">代理错误数</div>
+          <div class="big-number" id="errorCount">0</div>
         </div>
       </div>
     </section>
@@ -417,18 +436,8 @@
       <article class="panel">
         <div class="panel-head">
           <div>
-            <h2>Current Connections</h2>
-            <div class="panel-copy">只显示还没收到 <span class="mono">conn_close</span> 的请求。</div>
-          </div>
-        </div>
-        <div id="connectionsContainer" class="table-wrap"></div>
-      </article>
-
-      <article class="panel">
-        <div class="panel-head">
-          <div>
             <h2>Recent Events</h2>
-            <div class="panel-copy">便于快速查看打开、关闭和统计变更。</div>
+            <div class="panel-copy">展开显示关键字段、错误详情和原始请求信息，方便直接定位问题。</div>
           </div>
         </div>
         <ul id="eventList" class="event-list"></ul>
@@ -438,24 +447,23 @@
 
   <script>
     const state = {
-      activeConnections: new Map(),
       events: [],
       stats: {
         successCount: 0,
         failCount: 0,
         totalTokens: 0
-      }
+      },
+      errorCount: 0
     };
 
     const nodes = {
       connectionStatus: document.getElementById("connectionStatus"),
       lastEventTime: document.getElementById("lastEventTime"),
-      liveCount: document.getElementById("liveCount"),
+      errorCount: document.getElementById("errorCount"),
       successCount: document.getElementById("successCount"),
       failCount: document.getElementById("failCount"),
       tokenCount: document.getElementById("tokenCount"),
       eventCount: document.getElementById("eventCount"),
-      connectionsContainer: document.getElementById("connectionsContainer"),
       eventList: document.getElementById("eventList")
     };
 
@@ -477,9 +485,11 @@
         .replaceAll("'", "&#39;");
     }
 
-    function shortenJson(value) {
-      const raw = JSON.stringify(value ?? {}, null, 2);
-      return raw.length > 180 ? raw.slice(0, 180) + "..." : raw;
+    function formatJson(value) {
+      if (value == null) {
+        return "";
+      }
+      return JSON.stringify(value, null, 2);
     }
 
     function setConnectionStatus(connected, label) {
@@ -498,50 +508,26 @@
     }
 
     function renderStats() {
-      nodes.liveCount.textContent = String(state.activeConnections.size);
+      nodes.errorCount.textContent = String(state.errorCount);
       nodes.successCount.textContent = String(state.stats.successCount);
       nodes.failCount.textContent = String(state.stats.failCount);
       nodes.tokenCount.textContent = String(state.stats.totalTokens);
     }
 
-    function renderConnections() {
-      const rows = Array.from(state.activeConnections.values())
-        .sort((a, b) => b.ts - a.ts);
-
-      if (!rows.length) {
-        nodes.connectionsContainer.innerHTML = '<div class="empty">当前没有活跃连接</div>';
-        return;
+    function renderEventDetails(details) {
+      if (!details || !details.length) {
+        return "";
       }
 
-      const html = rows.map((item) => {
-        const model = item.request_info && item.request_info.model ? item.request_info.model : "-";
-        const pathBadge = `<span class="badge">${escapeHtml(item.path)}</span>`;
-        return `
-          <tr>
-            <td class="mono">${escapeHtml(item.conn_id)}</td>
-            <td>${escapeHtml(item.remote || "-")}</td>
-            <td>${pathBadge}</td>
-            <td>${escapeHtml(model)}</td>
-            <td class="mono">${formatTime(item.ts)}</td>
-            <td><span class="mono">${escapeHtml(shortenJson(item.request_info))}</span></td>
-          </tr>
-        `;
-      }).join("");
-
-      nodes.connectionsContainer.innerHTML = `
-        <table>
-          <thead>
-            <tr>
-              <th>Conn ID</th>
-              <th>Remote</th>
-              <th>Path</th>
-              <th>Model</th>
-              <th>Opened At</th>
-              <th>Request Info</th>
-            </tr>
-          </thead>
-          <tbody>${html}</tbody>
-        </table>
+      return `
+        <div class="event-detail-grid">
+          ${details.map((item) => `
+            <div class="event-detail">
+              <div class="event-label">${escapeHtml(item.label)}</div>
+              <div class="event-value">${escapeHtml(item.value ?? "-")}</div>
+            </div>
+          `).join("")}
+        </div>
       `;
     }
 
@@ -557,14 +543,15 @@
             <div class="event-title">${escapeHtml(item.title)}</div>
             <div class="event-time">${escapeHtml(formatTime(item.ts))}</div>
           </div>
-          <div class="event-body">${escapeHtml(item.body)}</div>
+          <div class="event-summary">${escapeHtml(item.summary)}</div>
+          ${renderEventDetails(item.details)}
+          ${item.raw ? `<pre class="event-raw">${escapeHtml(item.raw)}</pre>` : ""}
         </li>
       `).join("");
     }
 
     function renderAll() {
       renderStats();
-      renderConnections();
       renderEvents();
     }
 
@@ -576,20 +563,30 @@
       updateLastEventTime(payload.ts);
 
       if (payload.type === "conn_open") {
-        state.activeConnections.set(payload.conn_id, payload);
         pushEvent({
           title: "连接打开",
           ts: payload.ts,
-          body: `${payload.path} | ${payload.remote || "-"} | ${payload.request_info?.model || "-"}`
+          summary: `${payload.path} 收到一个新请求`,
+          details: [
+            { label: "Conn ID", value: payload.conn_id },
+            { label: "Remote", value: payload.remote || "-" },
+            { label: "Model", value: payload.request_info?.model || "-" }
+          ],
+          raw: formatJson(payload.request_info)
         });
       }
 
       if (payload.type === "conn_close") {
-        state.activeConnections.delete(payload.conn_id);
         pushEvent({
           title: "连接关闭",
           ts: payload.ts,
-          body: `${payload.path} | ${payload.remote || "-"} | status=${payload.status} | ${payload.cost_ms}ms`
+          summary: `${payload.path} 已结束`,
+          details: [
+            { label: "Conn ID", value: payload.conn_id },
+            { label: "Remote", value: payload.remote || "-" },
+            { label: "Status", value: payload.status },
+            { label: "Cost", value: `${payload.cost_ms}ms` }
+          ]
         });
       }
 
@@ -600,15 +597,28 @@
         pushEvent({
           title: "统计更新",
           ts: payload.ts,
-          body: `success=${state.stats.successCount}, fail=${state.stats.failCount}, tokens=${state.stats.totalTokens}`
+          summary: "服务端统计数据已刷新",
+          details: [
+            { label: "Success", value: state.stats.successCount },
+            { label: "Fail", value: state.stats.failCount },
+            { label: "Tokens", value: state.stats.totalTokens }
+          ]
         });
       }
 
       if (payload.type === "proxy_error") {
+        state.errorCount += 1;
         pushEvent({
           title: "代理错误",
           ts: payload.ts,
-          body: `${payload.path} | stage=${payload.stage} | status=${payload.status} | ${payload.error}`
+          summary: payload.error,
+          details: [
+            { label: "Conn ID", value: payload.conn_id },
+            { label: "Path", value: payload.path },
+            { label: "Stage", value: payload.stage },
+            { label: "Status", value: payload.status },
+            { label: "Upstream", value: payload.upstream_path }
+          ]
         });
       }
 
@@ -631,7 +641,10 @@
           pushEvent({
             title: "解析失败",
             ts: Date.now(),
-            body: "收到了一条无法解析的事件数据"
+            summary: "收到了一条无法解析的事件数据",
+            details: [
+              { label: "Reason", value: error.message || "Unknown parse error" }
+            ]
           });
           renderEvents();
         }

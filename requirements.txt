@@ -1,4 +1,4 @@
 aiohttp
 gunicorn
 redis
-python-dotenv
+PyYAML

@@ -7,7 +7,7 @@
 - 兼容 OpenAI 风格的聊天补全与向量请求转发
 - 支持普通响应和流式响应
 - 使用 Redis 发布连接事件与实时统计
-- 通过环境变量注入上游模型配置
+- 通过 `model.yaml` 配置多模型路由
 - 提供 Dockerfile 和 Docker Compose 部署方式
 
 ## 架构说明
@@ -39,46 +39,72 @@
     └── main.py
 ```
 
-## 环境变量
+## 配置文件
 
-程序启动时会读取以下环境变量：
+程序启动时会读取项目根目录的 `model.yaml`。
 
-| 变量名 | 必填 | 说明 |
-| --- | --- | --- |
-| `MODEL_API_KEY` | 是 | 上游模型服务的 API Key |
-| `MODEL_BASE_URL` | 是 | 上游模型服务的基础地址，例如 `https://example.com` |
-| `MODEL_NAME` | 是 | chat/completions 使用的模型名 |
-| `EMBEDDING_API_KEY` | 是 | embeddings 上游服务的 API Key |
-| `EMBEDDING_BASE_URL` | 是 | embeddings 上游服务的基础地址，例如 `https://example.com` |
-| `EMBEDDING_NAME` | 是 | embeddings 使用的模型名 |
-| `REDIS_URL` | 是 | Redis 连接地址，例如 `redis://model-redis:6379` |
+你当前使用的简洁格式如下：
 
-推荐在项目根目录创建 `.env` 文件：
+```yaml
+text-embedding-3-small:
+  api_key: your_embedding_api_key
+  base_url: https://your-provider.example.com
+  style: embdding
 
-```env
-MODEL_API_KEY=your_api_key
-MODEL_BASE_URL=https://your-model-provider.example.com
-MODEL_NAME=your_chat_model
-EMBEDDING_API_KEY=your_embedding_api_key
-EMBEDDING_BASE_URL=https://your-embedding-provider.example.com
-EMBEDDING_NAME=your_embedding_model
-REDIS_URL=redis://model-redis:6379
+qwen3.5-plus:
+  api_key: your_qwen_api_key
+  base_url: https://your-provider.example.com
+  style: openai
+
+gpt-4o:
+  api_key: your_gpt_api_key
+  base_url: https://your-provider.example.com
+  style: openai
+```
+
+字段说明：
+
+- 顶层 key：客户端请求里传入的 `model`
+- `api_key`：该模型对应上游服务的 API Key
+- `base_url`：该模型对应上游服务基础地址
+- `style`：模型类型
+- `openai`：可用于 `POST /v1/chat/completions`
+- `embedding` / `embeddings` / `embdding`：可用于 `POST /v1/embeddings`
+
+如果你希望“请求 model 名”和“实际转发给上游的 model 名”不一样，可以额外配置 `upstream_model`：
+
+```yaml
+gpt-4o:
+  api_key: your_api_key
+  base_url: https://your-provider.example.com
+  style: openai
+  upstream_model: gpt-4o-mini
+```
+
+可选高级格式：
+
+```yaml
+redis_url: redis://model-redis:6379
+models:
+  gpt-4o:
+    api_key: your_api_key
+    base_url: https://your-provider.example.com
+    style: openai
 ```
 
 说明：
 
-- 当前源码启动时会自动加载项目根目录的 `.env` 文件
-- 已经存在的系统环境变量优先，不会被 `.env` 覆盖
-- `docker compose` 会通过 `env_file` 把 `.env` 注入容器，所以容器部署时可以直接使用 `.env`
-- 如果你之前使用的是 `API_KEY` 或 `BASE_URL`，需要同步改成新的变量名
-- `docker-compose.yml` 中已经为容器注入了 `REDIS_URL=redis://model-redis:6379`
+- 默认会从 `model.yaml` 中读取模型配置
+- Redis 地址默认是 `redis://model-redis:6379`
+- 如果设置了系统环境变量 `REDIS_URL`，会覆盖默认 Redis 地址
+- 如果 `model.yaml` 使用了 `redis_url`，则优先使用该值
 
 ## 接口说明
 
 ### `POST /v1/chat/completions`
 
 用途：
-将请求转发到上游模型接口 `${MODEL_BASE_URL}/v1/chat/completions`
+根据请求体中的 `model`，选择 `model.yaml` 里对应的 OpenAI 风格模型，并转发到对应上游 `${base_url}/v1/chat/completions`
 
 请求头：
 
@@ -91,7 +117,7 @@ Content-Type: application/json
 
 ```json
 {
-  "model": "gpt-4o-mini",
+  "model": "gpt-4o",
   "messages": [
     { "role": "system", "content": "You are a helpful assistant." },
     { "role": "user", "content": "Hello" }
@@ -104,14 +130,15 @@ Content-Type: application/json
 
 - 非流式请求：直接返回上游 JSON 响应
 - 流式请求：以 `text/event-stream` 形式原样透传上游流
-- 服务端会强制覆盖请求体中的 `model` 为 `MODEL_NAME`
+- 服务端会按请求里的 `model` 选择路由配置
+- 如果配置了 `upstream_model`，会把转发给上游的 `model` 改成该值
 - 成功时累计 token 统计
 - 失败时累计失败次数
 
 ### `POST /v1/embeddings`
 
 用途：
-将请求转发到上游模型接口 `${EMBEDDING_BASE_URL}/v1/embeddings`
+根据请求体中的 `model`，选择 `model.yaml` 里对应的 embedding 模型，并转发到对应上游 `${base_url}/v1/embeddings`
 
 请求头：
 
@@ -132,7 +159,8 @@ Content-Type: application/json
 行为说明：
 
 - 非流式 JSON 请求，直接返回上游响应
-- 服务端会强制覆盖请求体中的 `model` 为 `EMBEDDING_NAME`
+- 服务端会按请求里的 `model` 选择路由配置
+- 如果配置了 `upstream_model`，会把转发给上游的 `model` 改成该值
 - 成功时累计 token 统计
 - 失败时累计失败次数
 
@@ -158,15 +186,15 @@ Content-Type: text/event-stream
 
 - `conn_open` 和 `conn_close` 都会带 `conn_id`，便于前端准确跟踪当前活跃连接
 - `proxy_error` 会带 `stage`、`status` 和 `error`，用于定位上游报错或响应解析失败
+- 如果 `model` 未配置，或请求到了错误的接口类型，也会通过 `proxy_error` 广播出来
 
 ### `GET /monitor`
 
 用途：
 打开内置静态监控页面，页面会自动订阅 `/events` 并显示：
 
-- 当前活跃连接数
+- 代理错误数
 - 成功次数、失败次数、累计 token 数
-- 当前连接列表
 - 最近 50 条事件
 
 ## Redis 中的频道与键
@@ -225,7 +253,7 @@ docker build -t iban-model-proxy:local .
 ### 运行容器
 
 ```bash
-docker run --rm -p 8000:8000 --env-file .env iban-model-proxy:local
+docker run --rm -p 8000:8000 -v "$(pwd)/model.yaml:/app/model.yaml:ro" iban-model-proxy:local
 ```
 
 ## Docker Compose 部署
