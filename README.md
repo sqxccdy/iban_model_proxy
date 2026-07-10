@@ -25,6 +25,7 @@
 4. 调用结果写入 Redis 统计
 5. 连接打开、关闭、实时统计通过 Redis Pub/Sub 广播
 6. 前端或监控侧可通过 `GET /events` 订阅事件流
+7. 可通过 `GET /monitor` 或根路径 `/` 打开内置监控页面
 
 ## 目录结构
 
@@ -66,7 +67,8 @@ REDIS_URL=redis://model-redis:6379
 
 说明：
 
-- 当前源码读取的是“进程环境变量”，不会自动解析 `.env` 文件
+- 当前源码启动时会自动加载项目根目录的 `.env` 文件
+- 已经存在的系统环境变量优先，不会被 `.env` 覆盖
 - `docker compose` 会通过 `env_file` 把 `.env` 注入容器，所以容器部署时可以直接使用 `.env`
 - 如果你之前使用的是 `API_KEY` 或 `BASE_URL`，需要同步改成新的变量名
 - `docker-compose.yml` 中已经为容器注入了 `REDIS_URL=redis://model-redis:6379`
@@ -150,6 +152,22 @@ Content-Type: text/event-stream
 - `conn_open`：连接打开事件
 - `conn_close`：连接关闭事件
 - `stats_update`：实时统计更新
+- `proxy_error`：代理转发或响应解析出错时的错误事件
+
+补充字段：
+
+- `conn_open` 和 `conn_close` 都会带 `conn_id`，便于前端准确跟踪当前活跃连接
+- `proxy_error` 会带 `stage`、`status` 和 `error`，用于定位上游报错或响应解析失败
+
+### `GET /monitor`
+
+用途：
+打开内置静态监控页面，页面会自动订阅 `/events` 并显示：
+
+- 当前活跃连接数
+- 成功次数、失败次数、累计 token 数
+- 当前连接列表
+- 最近 50 条事件
 
 ## Redis 中的频道与键
 
@@ -177,14 +195,6 @@ Content-Type: text/event-stream
 
 ```bash
 pip install -r requirements.txt
-```
-
-如果你要直接在本机运行，并且配置写在 `.env` 中，先把变量导入当前 shell：
-
-```bash
-set -a
-source .env
-set +a
 ```
 
 启动命令：

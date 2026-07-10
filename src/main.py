@@ -2,11 +2,18 @@ import os
 import time
 import json
 import logging
+from pathlib import Path
+from uuid import uuid4
+
+import aiohttp
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 from aiohttp import web, ClientSession, ClientTimeout
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 MODEL_API_KEY = os.environ['MODEL_API_KEY']
 MODEL_BASE_URL = os.environ['MODEL_BASE_URL']
@@ -25,6 +32,7 @@ TOTAL_TOKENS_KEY = "llm:stats:tokens"
 STATS_MONTH_KEY = "llm:stats:month"
 REALTIME_STATS_CHANNEL = "llm:stats:realtime"
 PROXY_REQUEST_PATHS = {"/v1/chat/completions", "/v1/embeddings"}
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def get_current_stats_month() -> str:
@@ -78,9 +86,33 @@ async def update_stats(redis, success: bool, tokens: int = 0):
     }, ensure_ascii=False))
 
 
+async def publish_proxy_error(
+        redis,
+        request,
+        upstream_path: str,
+        error_message: str,
+        *,
+        stage: str,
+        status: int,
+):
+    await redis.publish(BROADCAST_CHANNEL, json.dumps({
+        "type": "proxy_error",
+        "conn_id": request.get("conn_id"),
+        "remote": request.remote,
+        "path": request.path,
+        "upstream_path": upstream_path,
+        "stage": stage,
+        "status": status,
+        "error": error_message,
+        "ts": int(time.time() * 1000)
+    }, ensure_ascii=False))
+
+
 @web.middleware
 async def conn_broadcast_middleware(request, handler):
     start_ts = time.time()
+    conn_id = uuid4().hex
+    request["conn_id"] = conn_id
     redis = request.app["redis"]
     proxy_req = None
 
@@ -92,7 +124,7 @@ async def conn_broadcast_middleware(request, handler):
                 proxy_req["model"] = MODEL_NAME
             if "qwen3" in proxy_req["model"]:
                 proxy_req["model"] = MODEL_NAME
-            elif "gpt-4o" in proxy_req["model"]:
+            elif "gpt-4o-mini" in proxy_req["model"]:
                 proxy_req["model"] = MODEL_NAME
         elif request.path == "/v1/embeddings":
             proxy_req["model"] = EMBEDDING_NAME
@@ -100,6 +132,7 @@ async def conn_broadcast_middleware(request, handler):
 
     await redis.publish(BROADCAST_CHANNEL, json.dumps({
         "type": "conn_open",
+        "conn_id": conn_id,
         "remote": request.remote,
         "path": request.path,
         "request_info": proxy_req,
@@ -115,6 +148,7 @@ async def conn_broadcast_middleware(request, handler):
     finally:
         await redis.publish(BROADCAST_CHANNEL, json.dumps({
             "type": "conn_close",
+            "conn_id": conn_id,
             "remote": request.remote,
             "path": request.path,
             "status": status,
@@ -138,14 +172,37 @@ async def proxy_json_request(request, upstream_path: str, base_url: str, api_key
                 timeout=ClientTimeout(total=300)
         ) as resp:
             if resp.status != 200:
+                error_message = f"LLM API Error: {await resp.text()}"
+                await publish_proxy_error(
+                    request.app["redis"],
+                    request,
+                    upstream_path,
+                    error_message,
+                    stage="upstream_response",
+                    status=resp.status,
+                )
                 await update_stats(request.app["redis"], success=False)
                 return web.json_response(
-                    {"error": f"LLM API Error: {await resp.text()}"},
+                    {"error": error_message},
                     status=resp.status
                 )
 
             if not proxy_req.get("stream"):
-                result = await resp.json()
+                try:
+                    result = await resp.json()
+                except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                    response_text = await resp.text()
+                    error_message = f"Response parse error: {response_text or str(exc)}"
+                    await publish_proxy_error(
+                        request.app["redis"],
+                        request,
+                        upstream_path,
+                        error_message,
+                        stage="response_parse",
+                        status=502,
+                    )
+                    await update_stats(request.app["redis"], success=False)
+                    return web.json_response({"error": error_message}, status=502)
                 await update_stats(
                     request.app["redis"],
                     success=True,
@@ -180,7 +237,15 @@ async def proxy_json_request(request, upstream_path: str, base_url: str, api_key
             await response.write_eof()
             return response
 
-    except Exception:
+    except Exception as exc:
+        await publish_proxy_error(
+            request.app["redis"],
+            request,
+            upstream_path,
+            f"Internal error: {str(exc)}",
+            stage="proxy_exception",
+            status=500,
+        )
         await update_stats(request.app["redis"], success=False)
         return web.json_response({"error": "Internal error"}, status=500)
 
@@ -216,11 +281,15 @@ async def events(request):
         async for msg in pubsub.listen():
             if msg["type"] == "message":
                 await resp.write(f"data: {msg['data']}\n\n".encode("utf-8"))
-                await resp.drain()
+    except aiohttp.client_exceptions.ClientConnectionResetError:
+        logging.warning("Browser disconnected")
     finally:
         await pubsub.unsubscribe(BROADCAST_CHANNEL, REALTIME_STATS_CHANNEL)
-        await pubsub.close()
     return resp
+
+
+async def monitor(request):
+    return web.FileResponse(STATIC_DIR / "monitor.html")
 
 
 async def startup(app):
@@ -237,6 +306,8 @@ app = web.Application(middlewares=[conn_broadcast_middleware])
 app.router.add_post("/v1/chat/completions", chat)
 app.router.add_post("/v1/embeddings", embeddings)
 app.router.add_get("/events", events)
+app.router.add_get("/", monitor)
+app.router.add_get("/monitor", monitor)
 
 app.on_startup.append(startup)
 app.on_cleanup.append(cleanup)
