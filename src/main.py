@@ -8,8 +8,14 @@ from aiohttp import web, ClientSession, ClientTimeout
 
 logging.basicConfig(level=logging.INFO)
 
-API_KEY = os.environ['MODEL_API_KEY']
-BASE_URL = os.environ['MODEL_BASE_URL']
+MODEL_API_KEY = os.environ['MODEL_API_KEY']
+MODEL_BASE_URL = os.environ['MODEL_BASE_URL']
+MODEL_NAME = os.environ['MODEL_NAME']
+
+EMBEDDING_BASE_URL = os.environ['EMBEDDING_BASE_URL']
+EMBEDDING_API_KEY = os.environ['EMBEDDING_API_KEY']
+EMBEDDING_NAME = os.environ['EMBEDDING_NAME']
+
 REDIS_URL = os.environ['REDIS_URL']
 
 BROADCAST_CHANNEL = "conn:events"
@@ -18,6 +24,7 @@ FAIL_COUNT_KEY = "llm:stats:fail"
 TOTAL_TOKENS_KEY = "llm:stats:tokens"
 STATS_MONTH_KEY = "llm:stats:month"
 REALTIME_STATS_CHANNEL = "llm:stats:realtime"
+PROXY_REQUEST_PATHS = {"/v1/chat/completions", "/v1/embeddings"}
 
 
 def get_current_stats_month() -> str:
@@ -55,6 +62,8 @@ async def update_stats(redis, success: bool, tokens: int = 0):
     pipe.incr(SUCCESS_COUNT_KEY) if success else pipe.incr(FAIL_COUNT_KEY)
     if tokens > 0:
         pipe.incrby(TOTAL_TOKENS_KEY, tokens)
+    else:
+        pipe.incrby(TOTAL_TOKENS_KEY, 0)
     pipe.get(SUCCESS_COUNT_KEY)
     pipe.get(FAIL_COUNT_KEY)
     pipe.get(TOTAL_TOKENS_KEY)
@@ -73,38 +82,25 @@ async def update_stats(redis, success: bool, tokens: int = 0):
 async def conn_broadcast_middleware(request, handler):
     start_ts = time.time()
     redis = request.app["redis"]
-    req_info = None
+    proxy_req = None
 
-    # 只处理chat接口的请求，精准提取你要的信息
-    if request.path == "/v1/chat/completions" and request.method == "POST":
-        try:
-            # 直接读json，存到request上下文里，后面接口直接用，不重复读！
-            chat_req = await request.json()
-            request["chat_req"] = chat_req
+    # 只处理代理接口的请求，提前缓存请求体并强制模型
+    if request.path in PROXY_REQUEST_PATHS and request.method == "POST":
+        proxy_req = await request.json()
+        if request.path == "/v1/chat/completions":
+            if "deepseek" in proxy_req["model"]:
+                proxy_req["model"] = MODEL_NAME
+            elif proxy_req["model"] == "gpt-4o-mini":
+                proxy_req["model"] = MODEL_NAME
+        elif request.path == "/v1/embeddings":
+            proxy_req["model"] = EMBEDDING_NAME
+        request["proxy_req"] = proxy_req
 
-            # 👇 你要的3样东西，简简单单
-            req_info = {
-                "model": chat_req.get("model"),
-                # messages只取前2条，每条content截前50字，就是简略内容
-                "messages_preview": [
-                    {
-                        "role": m.get("role"),
-                        "content": (m.get("content") or "")[:50] + ("..." if len(m.get("content") or "") > 50 else "")
-                    }
-                    for m in chat_req.get("messages", [])[:2]
-                ],
-                # 除了model和messages的其他参数，就是你要的特殊参数
-                "extra_params": {k: v for k, v in chat_req.items() if k not in ("model", "messages")}
-            }
-        except Exception:
-            req_info = {"error": "invalid chat request"}
-
-    # conn_open直接带上你要的信息！
     await redis.publish(BROADCAST_CHANNEL, json.dumps({
         "type": "conn_open",
         "remote": request.remote,
         "path": request.path,
-        "request_info": req_info,  # 全是你想要的~
+        "request_info": proxy_req,
         "ts": int(start_ts * 1000)
     }, ensure_ascii=False))
 
@@ -126,19 +122,18 @@ async def conn_broadcast_middleware(request, handler):
     return resp
 
 
-async def chat(request):
-    # 直接用中间件存的请求，不用再读json，超快！
-    chat_req = request.get("chat_req")
-    if not chat_req:
+async def proxy_json_request(request, upstream_path: str, base_url: str, api_key: str):
+    proxy_req = request.get("proxy_req")
+    if not proxy_req:
         return web.json_response({"error": "Invalid request"}, status=400)
 
     session = request.app["client_session"]
     try:
         async with session.post(
-            f"{BASE_URL}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json=chat_req,
-            timeout=ClientTimeout(total=300)
+                f"{base_url}{upstream_path}",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=proxy_req,
+                timeout=ClientTimeout(total=300)
         ) as resp:
             if resp.status != 200:
                 await update_stats(request.app["redis"], success=False)
@@ -147,7 +142,7 @@ async def chat(request):
                     status=resp.status
                 )
 
-            if not chat_req.get("stream"):
+            if not proxy_req.get("stream"):
                 result = await resp.json()
                 await update_stats(
                     request.app["redis"],
@@ -188,6 +183,24 @@ async def chat(request):
         return web.json_response({"error": "Internal error"}, status=500)
 
 
+async def chat(request):
+    return await proxy_json_request(
+        request,
+        "/v1/chat/completions",
+        MODEL_BASE_URL,
+        MODEL_API_KEY,
+    )
+
+
+async def embeddings(request):
+    return await proxy_json_request(
+        request,
+        "/v1/embeddings",
+        EMBEDDING_BASE_URL,
+        EMBEDDING_API_KEY,
+    )
+
+
 async def events(request):
     resp = web.StreamResponse(
         headers={"Content-Type": "text/event-stream; charset=utf-8"}
@@ -220,6 +233,7 @@ async def cleanup(app):
 
 app = web.Application(middlewares=[conn_broadcast_middleware])
 app.router.add_post("/v1/chat/completions", chat)
+app.router.add_post("/v1/embeddings", embeddings)
 app.router.add_get("/events", events)
 
 app.on_startup.append(startup)

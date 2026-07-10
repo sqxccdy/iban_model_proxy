@@ -1,10 +1,10 @@
 # iBan Model Proxy
 
-一个基于 `aiohttp` 的轻量级模型代理服务，用来将上游大模型接口统一暴露为 OpenAI 风格的 `/v1/chat/completions` 接口，并借助 Redis 实现连接事件广播与调用统计。
+一个基于 `aiohttp` 的轻量级模型代理服务，用来将上游大模型接口统一暴露为 OpenAI 风格的 `/v1/chat/completions` 和 `/v1/embeddings` 接口，并借助 Redis 实现连接事件广播与调用统计。
 
 项目当前特性：
 
-- 兼容 OpenAI 风格的聊天补全请求转发
+- 兼容 OpenAI 风格的聊天补全与向量请求转发
 - 支持普通响应和流式响应
 - 使用 Redis 发布连接事件与实时统计
 - 通过环境变量注入上游模型配置
@@ -19,7 +19,7 @@
 
 核心流程如下：
 
-1. 客户端请求 `POST /v1/chat/completions`
+1. 客户端请求 `POST /v1/chat/completions` 或 `POST /v1/embeddings`
 2. `model_proxy` 读取请求体并记录简要请求信息
 3. 请求被转发到上游模型服务
 4. 调用结果写入 Redis 统计
@@ -46,6 +46,10 @@
 | --- | --- | --- |
 | `MODEL_API_KEY` | 是 | 上游模型服务的 API Key |
 | `MODEL_BASE_URL` | 是 | 上游模型服务的基础地址，例如 `https://example.com` |
+| `MODEL_NAME` | 是 | chat/completions 使用的模型名 |
+| `EMBEDDING_API_KEY` | 是 | embeddings 上游服务的 API Key |
+| `EMBEDDING_BASE_URL` | 是 | embeddings 上游服务的基础地址，例如 `https://example.com` |
+| `EMBEDDING_NAME` | 是 | embeddings 使用的模型名 |
 | `REDIS_URL` | 是 | Redis 连接地址，例如 `redis://model-redis:6379` |
 
 推荐在项目根目录创建 `.env` 文件：
@@ -53,6 +57,10 @@
 ```env
 MODEL_API_KEY=your_api_key
 MODEL_BASE_URL=https://your-model-provider.example.com
+MODEL_NAME=your_chat_model
+EMBEDDING_API_KEY=your_embedding_api_key
+EMBEDDING_BASE_URL=https://your-embedding-provider.example.com
+EMBEDDING_NAME=your_embedding_model
 REDIS_URL=redis://model-redis:6379
 ```
 
@@ -94,6 +102,35 @@ Content-Type: application/json
 
 - 非流式请求：直接返回上游 JSON 响应
 - 流式请求：以 `text/event-stream` 形式原样透传上游流
+- 服务端会强制覆盖请求体中的 `model` 为 `MODEL_NAME`
+- 成功时累计 token 统计
+- 失败时累计失败次数
+
+### `POST /v1/embeddings`
+
+用途：
+将请求转发到上游模型接口 `${EMBEDDING_BASE_URL}/v1/embeddings`
+
+请求头：
+
+```http
+Authorization: Bearer <由服务端注入，无需客户端传入>
+Content-Type: application/json
+```
+
+请求体示例：
+
+```json
+{
+  "model": "text-embedding-3-small",
+  "input": "hello world"
+}
+```
+
+行为说明：
+
+- 非流式 JSON 请求，直接返回上游响应
+- 服务端会强制覆盖请求体中的 `model` 为 `EMBEDDING_NAME`
 - 成功时累计 token 统计
 - 失败时累计失败次数
 
@@ -300,7 +337,7 @@ CMD ["gunicorn", "-w", "2", "-k", "aiohttp.GunicornWebWorker", "-b", "0.0.0.0:80
 
 - 修改代码后，如果你使用的是远程镜像方式，需要重新构建并发布镜像
 - 如果你在本地频繁调试，建议把 Compose 改为 `build: .`
-- 上游模型地址建议只填基础域名，不要重复拼接 `/v1/chat/completions`
+- 上游模型地址建议只填基础域名，不要重复拼接 `/v1/chat/completions` 或 `/v1/embeddings`
 
 ## 许可证
 
