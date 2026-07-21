@@ -19,6 +19,7 @@ FAIL_COUNT_KEY = "llm:stats:fail"
 TOTAL_TOKENS_KEY = "llm:stats:tokens"
 STATS_MONTH_KEY = "llm:stats:month"
 REALTIME_STATS_CHANNEL = "llm:stats:realtime"
+AUTHORIZATION_MAPPING_KEY = "monitor:authorization:mappings"
 PROXY_REQUEST_PATHS = {"/v1/chat/completions", "/v1/embeddings"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "model.yaml"
@@ -172,6 +173,29 @@ async def update_stats(redis, success: bool, tokens: int = 0):
     }, ensure_ascii=False))
 
 
+async def get_authorization_mappings(redis) -> list[dict[str, str]]:
+    mappings = await redis.hgetall(AUTHORIZATION_MAPPING_KEY)
+    return [
+        {"authorization": authorization, "description": description}
+        for authorization, description in sorted(mappings.items())
+    ]
+
+
+async def publish_authorization_mappings(redis):
+    await redis.publish(BROADCAST_CHANNEL, json.dumps({
+        "type": "authorization_mappings_update",
+        "mappings": await get_authorization_mappings(redis),
+        "ts": int(time.time() * 1000),
+    }, ensure_ascii=False))
+
+
+async def get_authorization_description(redis, authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    authorization = authorization.replace('Bearer ', '')
+    return await redis.hget(AUTHORIZATION_MAPPING_KEY, authorization)
+
+
 def attach_proxy_error(
         request,
         upstream_path: str,
@@ -188,10 +212,17 @@ def attach_proxy_error(
 
 @web.middleware
 async def conn_broadcast_middleware(request, handler):
+    if request.path in {"/events", "/authorization-mappings"}:
+        return await handler(request)
+
     start_ts = time.time()
     conn_id = uuid4().hex
     request["conn_id"] = conn_id
     redis = request.app["redis"]
+    authorization_description = await get_authorization_description(
+        redis,
+        request.headers.get("Authorization"),
+    )
     proxy_req = None
 
     # 只处理代理接口的请求，提前缓存请求体并强制模型
@@ -208,6 +239,7 @@ async def conn_broadcast_middleware(request, handler):
         "conn_id": conn_id,
         "remote": request.remote,
         "path": request.path,
+        "authorization": authorization_description or "未配置",
         "request_info": proxy_req,
         "ts": int(start_ts * 1000)
     }, ensure_ascii=False))
@@ -224,6 +256,7 @@ async def conn_broadcast_middleware(request, handler):
             "conn_id": conn_id,
             "remote": request.remote,
             "path": request.path,
+            "authorization": authorization_description or "未配置",
             "status": request.get("close_error_status", status),
             "stage": request.get("close_error_stage"),
             "error": request.get("close_error"),
@@ -361,6 +394,36 @@ async def embeddings(request):
     return await proxy_json_request(request, "/v1/embeddings")
 
 
+async def authorization_mappings(request):
+    redis = request.app["redis"]
+
+    if request.method == "GET":
+        return web.json_response({"mappings": await get_authorization_mappings(redis)})
+
+    try:
+        payload = await request.json()
+    except (aiohttp.ContentTypeError, json.JSONDecodeError):
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    authorization = payload.get("authorization") if isinstance(payload, dict) else None
+    if not isinstance(authorization, str) or not authorization.strip():
+        return web.json_response({"error": "authorization is required"}, status=400)
+    authorization = authorization.strip()
+
+    if request.method == "POST":
+        description = payload.get("description")
+        if not isinstance(description, str) or not description.strip():
+            return web.json_response({"error": "description is required"}, status=400)
+        await redis.hset(AUTHORIZATION_MAPPING_KEY, authorization, description.strip())
+    elif request.method == "DELETE":
+        await redis.hdel(AUTHORIZATION_MAPPING_KEY, authorization)
+    else:
+        return web.json_response({"error": "Method not allowed"}, status=405)
+
+    await publish_authorization_mappings(redis)
+    return web.json_response({"mappings": await get_authorization_mappings(redis)})
+
+
 async def events(request):
     resp = web.StreamResponse(
         headers={"Content-Type": "text/event-stream; charset=utf-8"}
@@ -399,6 +462,9 @@ app = web.Application(middlewares=[conn_broadcast_middleware])
 app.router.add_post("/v1/chat/completions", chat)
 app.router.add_post("/v1/embeddings", embeddings)
 app.router.add_get("/events", events)
+app.router.add_get("/authorization-mappings", authorization_mappings)
+app.router.add_post("/authorization-mappings", authorization_mappings)
+app.router.add_delete("/authorization-mappings", authorization_mappings)
 app.router.add_get("/", monitor)
 app.router.add_get("/monitor", monitor)
 

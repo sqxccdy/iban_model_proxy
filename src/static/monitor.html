@@ -308,6 +308,57 @@
       font-size: 11px;
     }
 
+    .key-form {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) auto;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .key-input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.65);
+      font: inherit;
+      font-size: 13px;
+    }
+
+    .key-button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      color: #fffaf0;
+      background: var(--accent);
+      cursor: pointer;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .key-button.delete {
+      color: var(--bad);
+      background: rgba(163, 52, 52, 0.1);
+    }
+
+    .key-mapping-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .key-mapping-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.52);
+    }
+
     .tabs {
       display: flex;
       gap: 8px;
@@ -463,6 +514,11 @@
         grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
         max-height: 220px;
       }
+
+      .key-form,
+      .key-mapping-item {
+        grid-template-columns: 1fr;
+      }
     }
 
     @media (max-width: 640px) {
@@ -553,6 +609,7 @@
         <div class="tabs" role="tablist" aria-label="事件分类">
           <button id="connectionsTab" class="tab" type="button" role="tab" aria-selected="true" aria-controls="connectionsPanel">连接</button>
           <button id="statsTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="statsPanel">统计更新</button>
+          <button id="keysTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="keysPanel">密钥管理</button>
         </div>
         <div id="connectionsPanel" class="tab-panel" role="tabpanel" aria-labelledby="connectionsTab">
           <div class="connection-layout">
@@ -566,6 +623,16 @@
         <div id="statsPanel" class="tab-panel" role="tabpanel" aria-labelledby="statsTab" hidden>
           <ul id="statsList" class="event-list"></ul>
         </div>
+        <div id="keysPanel" class="tab-panel" role="tabpanel" aria-labelledby="keysTab" hidden>
+          <form id="keyForm" class="key-form">
+            <button id="generateAuthorizationButton" class="key-button" type="button">生成</button>
+            <input id="authorizationInput" class="key-input mono" name="authorization" placeholder="Authorization 内容，例如 Bearer sk-..." required autocomplete="off">
+            <input id="descriptionInput" class="key-input" name="description" placeholder="显示描述，例如：生产环境 A" required>
+            <button class="key-button" type="submit">保存</button>
+          </form>
+          <div class="panel-copy">保存同一个 Authorization 会更新其描述。连接事件只显示描述，不展示原始 Authorization。</div>
+          <div id="keyMappingList" class="key-mapping-list"></div>
+        </div>
       </article>
     </section>
   </div>
@@ -575,6 +642,7 @@
       connections: new Map(),
       selectedConnId: null,
       statsEvents: [],
+      authorizationMappings: [],
       stats: {
         successCount: 0,
         failCount: 0,
@@ -593,11 +661,18 @@
       connectionCount: document.getElementById("connectionCount"),
       connectionsTab: document.getElementById("connectionsTab"),
       statsTab: document.getElementById("statsTab"),
+      keysTab: document.getElementById("keysTab"),
       connectionsPanel: document.getElementById("connectionsPanel"),
       statsPanel: document.getElementById("statsPanel"),
+      keysPanel: document.getElementById("keysPanel"),
       connectionFilterList: document.getElementById("connectionFilterList"),
       connectionList: document.getElementById("connectionList"),
-      statsList: document.getElementById("statsList")
+      statsList: document.getElementById("statsList"),
+      keyForm: document.getElementById("keyForm"),
+      authorizationInput: document.getElementById("authorizationInput"),
+      generateAuthorizationButton: document.getElementById("generateAuthorizationButton"),
+      descriptionInput: document.getElementById("descriptionInput"),
+      keyMappingList: document.getElementById("keyMappingList")
     };
 
     function formatTime(ts) {
@@ -616,6 +691,16 @@
         .replaceAll(">", "&gt;")
         .replaceAll("\"", "&quot;")
         .replaceAll("'", "&#39;");
+    }
+
+    function generateAuthorization() {
+      if (crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     }
 
     function formatJson(value) {
@@ -715,6 +800,7 @@
           details: [
             { label: "Conn ID", value: connection.connId },
             { label: "Remote", value: open.remote || "-" },
+            { label: "Authorization", value: open.authorization || "未配置" },
             { label: "Model", value: open.request_info?.model || "-" }
           ],
           raw: formatJson(open.request_info)
@@ -730,6 +816,7 @@
           details: [
             { label: "Conn ID", value: connection.connId },
             { label: "Remote", value: close.remote || open?.remote || "-" },
+            { label: "Authorization", value: close.authorization || open?.authorization || "未配置" },
             { label: "Status", value: close.status },
             { label: "Cost", value: `${close.cost_ms}ms` }
           ].concat(hasError ? [
@@ -771,10 +858,64 @@
       renderList(nodes.statsList, state.statsEvents, "正在等待统计更新...");
     }
 
+    function renderAuthorizationMappings() {
+      if (!state.authorizationMappings.length) {
+        nodes.keyMappingList.innerHTML = '<div class="empty">尚未配置 Authorization 映射。</div>';
+        return;
+      }
+
+      nodes.keyMappingList.innerHTML = state.authorizationMappings.map((mapping) => `
+        <div class="key-mapping-item">
+          <div class="mono">${escapeHtml(mapping.authorization)}</div>
+          <div>${escapeHtml(mapping.description)}</div>
+          <button class="key-button delete" type="button" data-delete-authorization="${escapeHtml(mapping.authorization)}">删除</button>
+        </div>
+      `).join("");
+    }
+
+    async function loadAuthorizationMappings() {
+      const response = await fetch("/authorization-mappings");
+      if (!response.ok) {
+        throw new Error("无法读取密钥映射");
+      }
+      const payload = await response.json();
+      state.authorizationMappings = payload.mappings || [];
+      renderAuthorizationMappings();
+    }
+
+    async function saveAuthorizationMapping(authorization, description) {
+      const response = await fetch("/authorization-mappings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authorization, description })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "保存失败");
+      }
+      state.authorizationMappings = payload.mappings || [];
+      renderAuthorizationMappings();
+    }
+
+    async function deleteAuthorizationMapping(authorization) {
+      const response = await fetch("/authorization-mappings", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authorization })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "删除失败");
+      }
+      state.authorizationMappings = payload.mappings || [];
+      renderAuthorizationMappings();
+    }
+
     function renderAll() {
       renderStats();
       renderConnections();
       renderStatsEvents();
+      renderAuthorizationMappings();
     }
 
     function handleEvent(payload) {
@@ -811,15 +952,20 @@
         });
       }
 
+      if (payload.type === "authorization_mappings_update") {
+        state.authorizationMappings = payload.mappings || [];
+      }
+
       renderAll();
     }
 
     function showTab(name) {
-      const showConnections = name === "connections";
-      nodes.connectionsTab.setAttribute("aria-selected", String(showConnections));
-      nodes.statsTab.setAttribute("aria-selected", String(!showConnections));
-      nodes.connectionsPanel.hidden = !showConnections;
-      nodes.statsPanel.hidden = showConnections;
+      nodes.connectionsTab.setAttribute("aria-selected", String(name === "connections"));
+      nodes.statsTab.setAttribute("aria-selected", String(name === "stats"));
+      nodes.keysTab.setAttribute("aria-selected", String(name === "keys"));
+      nodes.connectionsPanel.hidden = name !== "connections";
+      nodes.statsPanel.hidden = name !== "stats";
+      nodes.keysPanel.hidden = name !== "keys";
     }
 
     function startEventStream() {
@@ -855,6 +1001,7 @@
     renderAll();
     nodes.connectionsTab.addEventListener("click", () => showTab("connections"));
     nodes.statsTab.addEventListener("click", () => showTab("stats"));
+    nodes.keysTab.addEventListener("click", () => showTab("keys"));
     nodes.connectionFilterList.addEventListener("click", (event) => {
       const button = event.target.closest("button[data-conn-id]");
       if (!button) {
@@ -862,6 +1009,33 @@
       }
       state.selectedConnId = button.dataset.connId || null;
       renderConnections();
+    });
+    nodes.keyForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await saveAuthorizationMapping(nodes.authorizationInput.value.trim(), nodes.descriptionInput.value.trim());
+        nodes.keyForm.reset();
+      } catch (error) {
+        alert(error.message || "保存失败");
+      }
+    });
+    nodes.generateAuthorizationButton.addEventListener("click", () => {
+      nodes.authorizationInput.value = generateAuthorization();
+      nodes.authorizationInput.focus();
+    });
+    nodes.keyMappingList.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-delete-authorization]");
+      if (!button || !confirm("确定删除这个 Authorization 映射吗？")) {
+        return;
+      }
+      try {
+        await deleteAuthorizationMapping(button.dataset.deleteAuthorization);
+      } catch (error) {
+        alert(error.message || "删除失败");
+      }
+    });
+    loadAuthorizationMappings().catch((error) => {
+      nodes.keyMappingList.innerHTML = `<div class="empty">${escapeHtml(error.message || "无法读取密钥映射")}</div>`;
     });
     startEventStream();
   </script>
