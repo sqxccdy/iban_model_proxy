@@ -198,11 +198,10 @@ async def conn_broadcast_middleware(request, handler):
     if request.path in PROXY_REQUEST_PATHS and request.method == "POST":
         proxy_req = await request.json()
         request["proxy_req"] = proxy_req
-    if request["proxy_req"]['model'] in [
-        'qwen3.5-plus',
-        'gpt-4o'
-    ]:
-        request["proxy_req"]['enable_thinking'] = False
+        if request["proxy_req"]['model'] in [
+            'qwen3.5-plus',
+        ]:
+            request["proxy_req"]['enable_thinking'] = False
 
     await redis.publish(BROADCAST_CHANNEL, json.dumps({
         "type": "conn_open",

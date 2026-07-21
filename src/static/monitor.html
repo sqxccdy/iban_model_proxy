@@ -246,6 +246,101 @@
       overflow: auto;
     }
 
+    .connection-layout {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .connection-filter {
+      min-width: 0;
+      padding-right: 16px;
+      border-right: 1px solid var(--line);
+    }
+
+    .filter-heading {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .connection-filter-list {
+      display: grid;
+      gap: 6px;
+      max-height: 920px;
+      overflow: auto;
+    }
+
+    .connection-filter-button {
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 9px 10px;
+      color: var(--text);
+      background: transparent;
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      text-align: left;
+    }
+
+    .connection-filter-button:hover,
+    .connection-filter-button.active {
+      border-color: var(--line);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .connection-filter-id {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .connection-filter-status {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tab {
+      appearance: none;
+      border: 0;
+      border-bottom: 3px solid transparent;
+      padding: 10px 12px;
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .tab:hover,
+    .tab[aria-selected="true"] {
+      color: var(--accent);
+    }
+
+    .tab[aria-selected="true"] {
+      border-bottom-color: var(--accent);
+    }
+
+    .tab-panel[hidden] {
+      display: none;
+    }
+
     .event-item {
       border: 1px solid var(--line);
       border-radius: 16px;
@@ -353,6 +448,21 @@
       .event-detail-grid {
         grid-template-columns: 1fr;
       }
+
+      .connection-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .connection-filter {
+        padding: 0 0 12px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .connection-filter-list {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        max-height: 220px;
+      }
     }
 
     @media (max-width: 640px) {
@@ -425,10 +535,10 @@
       </article>
       <article class="panel card">
         <div>
-          <h2>最近事件</h2>
-          <div class="card-value" id="eventCount">0</div>
+          <h2>最近连接</h2>
+          <div class="card-value" id="connectionCount">0</div>
         </div>
-        <div class="card-footer">页面内保留最近 50 条事件</div>
+        <div class="card-footer">页面内保留最近 50 个连接</div>
       </article>
     </section>
 
@@ -436,18 +546,35 @@
       <article class="panel">
         <div class="panel-head">
           <div>
-            <h2>Recent Events</h2>
-            <div class="panel-copy">展开显示关键字段、错误详情和原始请求信息，方便直接定位问题。</div>
+            <h2>实时事件</h2>
+            <div class="panel-copy">连接会按 <span class="mono">conn_id</span> 自动合并打开和关闭事件；统计更新独立保存。</div>
           </div>
         </div>
-        <ul id="eventList" class="event-list"></ul>
+        <div class="tabs" role="tablist" aria-label="事件分类">
+          <button id="connectionsTab" class="tab" type="button" role="tab" aria-selected="true" aria-controls="connectionsPanel">连接</button>
+          <button id="statsTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="statsPanel">统计更新</button>
+        </div>
+        <div id="connectionsPanel" class="tab-panel" role="tabpanel" aria-labelledby="connectionsTab">
+          <div class="connection-layout">
+            <aside class="connection-filter" aria-label="按连接筛选">
+              <div class="filter-heading">Conn ID</div>
+              <div id="connectionFilterList" class="connection-filter-list"></div>
+            </aside>
+            <ul id="connectionList" class="event-list"></ul>
+          </div>
+        </div>
+        <div id="statsPanel" class="tab-panel" role="tabpanel" aria-labelledby="statsTab" hidden>
+          <ul id="statsList" class="event-list"></ul>
+        </div>
       </article>
     </section>
   </div>
 
   <script>
     const state = {
-      events: [],
+      connections: new Map(),
+      selectedConnId: null,
+      statsEvents: [],
       stats: {
         successCount: 0,
         failCount: 0,
@@ -463,8 +590,14 @@
       successCount: document.getElementById("successCount"),
       failCount: document.getElementById("failCount"),
       tokenCount: document.getElementById("tokenCount"),
-      eventCount: document.getElementById("eventCount"),
-      eventList: document.getElementById("eventList")
+      connectionCount: document.getElementById("connectionCount"),
+      connectionsTab: document.getElementById("connectionsTab"),
+      statsTab: document.getElementById("statsTab"),
+      connectionsPanel: document.getElementById("connectionsPanel"),
+      statsPanel: document.getElementById("statsPanel"),
+      connectionFilterList: document.getElementById("connectionFilterList"),
+      connectionList: document.getElementById("connectionList"),
+      statsList: document.getElementById("statsList")
     };
 
     function formatTime(ts) {
@@ -497,10 +630,29 @@
       nodes.connectionStatus.lastElementChild.textContent = label;
     }
 
-    function pushEvent(item) {
-      state.events.unshift(item);
-      state.events = state.events.slice(0, 50);
-      nodes.eventCount.textContent = String(state.events.length);
+    function updateConnection(payload) {
+      const connection = state.connections.get(payload.conn_id) || { connId: payload.conn_id };
+      if (payload.type === "conn_open") {
+        connection.open = payload;
+      } else {
+        connection.close = payload;
+      }
+      state.connections.set(payload.conn_id, connection);
+
+      while (state.connections.size > 50) {
+        const oldest = [...state.connections.entries()]
+          .sort(([, a], [, b]) => (a.open?.ts || a.close?.ts || 0) - (b.open?.ts || b.close?.ts || 0))[0];
+        state.connections.delete(oldest[0]);
+        if (state.selectedConnId === oldest[0]) {
+          state.selectedConnId = null;
+        }
+      }
+      nodes.connectionCount.textContent = String(state.connections.size);
+    }
+
+    function pushStatsEvent(item) {
+      state.statsEvents.unshift(item);
+      state.statsEvents = state.statsEvents.slice(0, 50);
     }
 
     function updateLastEventTime(ts) {
@@ -531,13 +683,13 @@
       `;
     }
 
-    function renderEvents() {
-      if (!state.events.length) {
-        nodes.eventList.innerHTML = '<li class="empty">正在等待事件流...</li>';
+    function renderList(node, items, emptyText) {
+      if (!items.length) {
+        node.innerHTML = `<li class="empty">${emptyText}</li>`;
         return;
       }
 
-      nodes.eventList.innerHTML = state.events.map((item) => `
+      node.innerHTML = items.map((item) => `
         <li class="event-item">
           <div class="event-top">
             <div class="event-title">${escapeHtml(item.title)}</div>
@@ -550,9 +702,79 @@
       `).join("");
     }
 
+    function connectionToEvents(connection) {
+      const open = connection.open;
+      const close = connection.close;
+      const events = [];
+
+      if (open) {
+        events.push({
+          title: "连接打开",
+          ts: open.ts,
+          summary: `${open.path} 收到一个新请求`,
+          details: [
+            { label: "Conn ID", value: connection.connId },
+            { label: "Remote", value: open.remote || "-" },
+            { label: "Model", value: open.request_info?.model || "-" }
+          ],
+          raw: formatJson(open.request_info)
+        });
+      }
+
+      if (close) {
+        const hasError = Boolean(close.error);
+        events.push({
+          title: hasError ? "连接关闭（错误）" : "连接关闭",
+          ts: close.ts,
+          summary: close.error || `${close.path} 已结束`,
+          details: [
+            { label: "Conn ID", value: connection.connId },
+            { label: "Remote", value: close.remote || open?.remote || "-" },
+            { label: "Status", value: close.status },
+            { label: "Cost", value: `${close.cost_ms}ms` }
+          ].concat(hasError ? [
+            { label: "Stage", value: close.stage || "-" },
+            { label: "Upstream", value: close.upstream_path || "-" }
+          ] : []),
+          raw: close.response_preview || ""
+        });
+      }
+
+      return events;
+    }
+
+    function renderConnections() {
+      const connections = [...state.connections.values()]
+        .sort((a, b) => (b.open?.ts || b.close?.ts || 0) - (a.open?.ts || a.close?.ts || 0));
+      nodes.connectionFilterList.innerHTML = [
+        `<button class="connection-filter-button ${state.selectedConnId === null ? "active" : ""}" type="button" data-conn-id="">全部连接</button>`,
+        ...connections.map((connection) => {
+          const active = state.selectedConnId === connection.connId;
+          const status = connection.close ? (connection.close.error ? "关闭：错误" : "已关闭") : "处理中";
+          return `<button class="connection-filter-button ${active ? "active" : ""}" type="button" data-conn-id="${escapeHtml(connection.connId)}" title="${escapeHtml(connection.connId)}">
+            <span class="connection-filter-id mono">${escapeHtml(connection.connId)}</span>
+            <span class="connection-filter-status">${escapeHtml(status)}</span>
+          </button>`;
+        })
+      ].join("");
+
+      const visibleConnections = state.selectedConnId === null
+        ? connections
+        : connections.filter((connection) => connection.connId === state.selectedConnId);
+      const events = visibleConnections
+        .flatMap(connectionToEvents)
+        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      renderList(nodes.connectionList, events, state.selectedConnId ? "未找到该连接" : "正在等待连接事件...");
+    }
+
+    function renderStatsEvents() {
+      renderList(nodes.statsList, state.statsEvents, "正在等待统计更新...");
+    }
+
     function renderAll() {
       renderStats();
-      renderEvents();
+      renderConnections();
+      renderStatsEvents();
     }
 
     function handleEvent(payload) {
@@ -563,45 +785,21 @@
       updateLastEventTime(payload.ts);
 
       if (payload.type === "conn_open") {
-        pushEvent({
-          title: "连接打开",
-          ts: payload.ts,
-          summary: `${payload.path} 收到一个新请求`,
-          details: [
-            { label: "Conn ID", value: payload.conn_id },
-            { label: "Remote", value: payload.remote || "-" },
-            { label: "Model", value: payload.request_info?.model || "-" }
-          ],
-          raw: formatJson(payload.request_info)
-        });
+        updateConnection(payload);
       }
 
       if (payload.type === "conn_close") {
         if (payload.error) {
           state.errorCount += 1;
         }
-        pushEvent({
-          title: payload.error ? "连接关闭（错误）" : "连接关闭",
-          ts: payload.ts,
-          summary: payload.error || `${payload.path} 已结束`,
-          details: [
-            { label: "Conn ID", value: payload.conn_id },
-            { label: "Remote", value: payload.remote || "-" },
-            { label: "Status", value: payload.status },
-            { label: "Cost", value: `${payload.cost_ms}ms` }
-          ].concat(payload.error ? [
-            { label: "Stage", value: payload.stage || "-" },
-            { label: "Upstream", value: payload.upstream_path || "-" }
-          ] : []),
-          raw: payload.response_preview || ""
-        });
+        updateConnection(payload);
       }
 
       if (payload.type === "stats_update") {
         state.stats.successCount = payload.success_count ?? 0;
         state.stats.failCount = payload.fail_count ?? 0;
         state.stats.totalTokens = payload.total_tokens ?? 0;
-        pushEvent({
+        pushStatsEvent({
           title: "统计更新",
           ts: payload.ts,
           summary: "服务端统计数据已刷新",
@@ -614,6 +812,14 @@
       }
 
       renderAll();
+    }
+
+    function showTab(name) {
+      const showConnections = name === "connections";
+      nodes.connectionsTab.setAttribute("aria-selected", String(showConnections));
+      nodes.statsTab.setAttribute("aria-selected", String(!showConnections));
+      nodes.connectionsPanel.hidden = !showConnections;
+      nodes.statsPanel.hidden = showConnections;
     }
 
     function startEventStream() {
@@ -629,7 +835,7 @@
           const payload = JSON.parse(event.data);
           handleEvent(payload);
         } catch (error) {
-          pushEvent({
+          pushStatsEvent({
             title: "解析失败",
             ts: Date.now(),
             summary: "收到了一条无法解析的事件数据",
@@ -637,7 +843,7 @@
               { label: "Reason", value: error.message || "Unknown parse error" }
             ]
           });
-          renderEvents();
+          renderStatsEvents();
         }
       };
 
@@ -647,6 +853,16 @@
     }
 
     renderAll();
+    nodes.connectionsTab.addEventListener("click", () => showTab("connections"));
+    nodes.statsTab.addEventListener("click", () => showTab("stats"));
+    nodes.connectionFilterList.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-conn-id]");
+      if (!button) {
+        return;
+      }
+      state.selectedConnId = button.dataset.connId || null;
+      renderConnections();
+    });
     startEventStream();
   </script>
 </body>
