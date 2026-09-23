@@ -15,5 +15,5 @@ COPY ./requirements.txt ./
 COPY ./src ./src
 RUN pip3 install -r requirements.txt -i https://mirrors.cloud.tencent.com/pypi/simple/
 
-CMD ["gunicorn", "-w", "4", "-k", "aiohttp.GunicornWebWorker", "-b", "0.0.0.0:8000", "--access-logfile", "-", "--error-logfile", "-", "src.main:app"]
+CMD ["gunicorn", "-w", "32", "-k", "aiohttp.GunicornWebWorker", "-b", "0.0.0.0:8000", "--access-logfile", "-", "--error-logfile", "-", "src.main:app"]
 #CMD ["tail", "-f", "/dev/null"]

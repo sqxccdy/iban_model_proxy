@@ -1,6 +1,6 @@
 # iBan Model Proxy
 
-一个基于 `aiohttp` 的轻量级模型代理服务，用来将上游大模型接口统一暴露为 OpenAI 风格的 `/v1/chat/completions` 和 `/v1/embeddings` 接口，并借助 Redis 实现连接事件广播与调用统计。
+一个基于 `aiohttp` 的轻量级模型代理服务，用来将上游大模型接口统一暴露为 OpenAI 风格的 `/v1/chat/completions`、`/v1/responses` 和 `/v1/embeddings` 接口，并借助 Redis 实现连接事件广播与调用统计。
 
 项目当前特性：
 
@@ -19,7 +19,7 @@
 
 核心流程如下：
 
-1. 客户端请求 `POST /v1/chat/completions` 或 `POST /v1/embeddings`
+1. 客户端请求 `POST /v1/chat/completions`、`POST /v1/responses` 或 `POST /v1/embeddings`
 2. `model_proxy` 读取请求体并记录简要请求信息
 3. 请求被转发到上游模型服务
 4. 调用结果写入 Redis 统计
@@ -70,6 +70,7 @@ gpt-4o:
 - `style`：模型类型
 - `openai`：可用于 `POST /v1/chat/completions`
 - `embedding` / `embeddings` / `embdding`：可用于 `POST /v1/embeddings`
+- `mineru`：可用于 `POST /file_parse`，不需要 `model` 或 `api_key`
 
 如果你希望“请求 model 名”和“实际转发给上游的 model 名”不一样，可以额外配置 `upstream_model`：
 
@@ -79,6 +80,18 @@ gpt-4o:
   base_url: https://your-provider.example.com
   style: openai
   upstream_model: gpt-4o-mini
+```
+
+也可以通过 `extra_params` 为指定模型固定注入额外请求字段。配置值会覆盖客户端请求中的同名字段：
+
+```yaml
+qwen3-32b:
+  upstream_model: qwen3.5-plus
+  api_key: your_api_key
+  base_url: https://your-provider.example.com
+  style: openai
+  extra_params:
+    enable_thinking: false
 ```
 
 可选高级格式：
@@ -135,6 +148,27 @@ Content-Type: application/json
 - 成功时累计 token 统计
 - 失败时累计失败次数
 
+### `POST /v1/responses`
+
+用途：
+根据请求体中的 `model`，选择 `model.yaml` 中 `style: openai` 的模型，并转发到对应上游 `${base_url}/v1/responses`。
+
+请求体示例：
+
+```json
+{
+  "model": "gpt-4o",
+  "input": "Hello",
+  "stream": false
+}
+```
+
+行为说明：
+
+- 支持 OpenAI Responses API 的普通 JSON 响应和 SSE 流式响应透传
+- 复用聊天模型的路由配置和 `upstream_model` 映射
+- 成功与失败调用都会写入既有 Redis 统计；监控页面会展示可提取的输出文本
+
 ### `POST /v1/embeddings`
 
 用途：
@@ -163,6 +197,24 @@ Content-Type: application/json
 - 如果配置了 `upstream_model`，会把转发给上游的 `model` 改成该值
 - 成功时累计 token 统计
 - 失败时累计失败次数
+
+### `POST /file_parse`
+
+用途：
+将 MinerU API 的文件解析请求透传到唯一的 `style: mineru` 配置。请求使用 `multipart/form-data`（或 URL 编码表单），文件和其它字段会原样保留；服务端会以配置中的 `backend` 覆盖客户端传入的同名字段。
+
+配置示例：
+
+```yaml
+mineru:
+  backend: vlm-engine
+  base_url: https://192.168.1.201:8080
+  style: mineru
+```
+
+MinerU 请求同样写入既有成功／失败统计与连接监控。配置多个 `style: mineru` 条目会阻止服务启动。
+
+`/file_parse` 的上传上限由环境变量 `MAX_UPLOAD_SIZE` 控制，单位为字节，默认 `1073741824`（1 GiB）。
 
 ### `GET /events`
 

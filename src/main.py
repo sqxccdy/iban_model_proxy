@@ -20,10 +20,12 @@ TOTAL_TOKENS_KEY = "llm:stats:tokens"
 STATS_MONTH_KEY = "llm:stats:month"
 REALTIME_STATS_CHANNEL = "llm:stats:realtime"
 AUTHORIZATION_MAPPING_KEY = "monitor:authorization:mappings"
-PROXY_REQUEST_PATHS = {"/v1/chat/completions", "/v1/embeddings"}
+PROXY_REQUEST_PATHS = {"/v1/chat/completions", "/v1/responses", "/v1/embeddings", "/file_parse"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "model.yaml"
 DEFAULT_REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+MAX_UPLOAD_SIZE = int(os.environ.get("MAX_UPLOAD_SIZE", str(1024 * 1024 * 1024)))
+DEFAULT_MINERU_BACKEND = "vlm-engine"
 
 
 def normalize_model_style(style: str | None) -> str | None:
@@ -35,6 +37,7 @@ def normalize_model_style(style: str | None) -> str | None:
         "embedding": "embedding",
         "embeddings": "embedding",
         "embdding": "embedding",
+        "mineru": "mineru",
     }
     return style_map.get((style or "").strip().lower())
 
@@ -67,21 +70,26 @@ def load_model_config() -> dict:
         base_url = model_config.get("base_url")
         style = normalize_model_style(model_config.get("style"))
         upstream_model = model_config.get("upstream_model") or request_model
+        chat_template_kwargs = model_config.get("chat_template_kwargs") or {}
 
-        if not api_key:
-            raise RuntimeError(f"Model '{request_model}' missing api_key")
         if not base_url:
             raise RuntimeError(f"Model '{request_model}' missing base_url")
         if not style:
             raise RuntimeError(
                 f"Model '{request_model}' has invalid style '{model_config.get('style')}'"
             )
+        if style != "mineru" and not api_key:
+            raise RuntimeError(f"Model '{request_model}' missing api_key")
+        if not isinstance(chat_template_kwargs, dict):
+            raise RuntimeError(f"Model '{request_model}' extra_params must be a mapping")
 
         models[request_model] = {
             "api_key": api_key,
             "base_url": str(base_url).rstrip("/"),
             "style": style,
             "upstream_model": upstream_model,
+            "chat_template_kwargs": dict(chat_template_kwargs),
+            "backend": str(model_config.get("backend") or DEFAULT_MINERU_BACKEND),
         }
 
     return {
@@ -93,10 +101,16 @@ def load_model_config() -> dict:
 MODEL_CONFIG = load_model_config()
 REDIS_URL = MODEL_CONFIG["redis_url"]
 MODEL_ROUTES = MODEL_CONFIG["models"]
+MINERU_ROUTES = [route for route in MODEL_ROUTES.values() if route["style"] == "mineru"]
+
+if len(MINERU_ROUTES) > 1:
+    raise RuntimeError("model.yaml can define only one style: mineru route")
+
+MINERU_ROUTE = MINERU_ROUTES[0] if MINERU_ROUTES else None
 
 
 def get_expected_route_style(request_path: str) -> str:
-    if request_path == "/v1/chat/completions":
+    if request_path in {"/v1/chat/completions", "/v1/responses"}:
         return "chat"
     if request_path == "/v1/embeddings":
         return "embedding"
@@ -120,6 +134,25 @@ def resolve_model_route(request_path: str, request_model: str | None) -> tuple[d
 
 def build_json_preview(payload) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def get_response_preview(payload) -> str:
+    """Extract display text from a Responses API payload when available."""
+    if not isinstance(payload, dict):
+        return build_json_preview(payload)
+
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str):
+        return output_text
+
+    text_parts = []
+    for output in payload.get("output", []):
+        if not isinstance(output, dict):
+            continue
+        for content in output.get("content", []):
+            if isinstance(content, dict) and isinstance(content.get("text"), str):
+                text_parts.append(content["text"])
+    return "".join(text_parts) or build_json_preview(payload)
 
 
 def get_current_stats_month() -> str:
@@ -226,13 +259,25 @@ async def conn_broadcast_middleware(request, handler):
     proxy_req = None
 
     # 只处理代理接口的请求，提前缓存请求体并强制模型
-    if request.path in PROXY_REQUEST_PATHS and request.method == "POST":
-        proxy_req = await request.json()
+    if request.path == "/file_parse" and request.method == "POST":
+        proxy_req = {
+            "service": "mineru",
+            "backend": MINERU_ROUTE["backend"] if MINERU_ROUTE else "-",
+        }
         request["proxy_req"] = proxy_req
-        if request["proxy_req"]['model'] in [
-            'qwen3.5-plus',
-        ]:
-            request["proxy_req"]['enable_thinking'] = False
+    elif request.path in PROXY_REQUEST_PATHS and request.method == "POST":
+        proxy_req = await request.json()
+        # 尝试转化schema
+        if 'response_format' in proxy_req:
+            if 'json_schema' in proxy_req['response_format']:
+                if 'schema' in proxy_req['response_format']['json_schema']:
+                    if isinstance(proxy_req['response_format']['json_schema']['schema'], str):
+                        try:
+                            proxy_req['response_format']['json_schema']['schema'] = json.loads(
+                                proxy_req['response_format']['json_schema']['schema'])
+                        except KeyError:
+                            pass
+        request["proxy_req"] = proxy_req
 
     await redis.publish(BROADCAST_CHANNEL, json.dumps({
         "type": "conn_open",
@@ -290,6 +335,21 @@ async def proxy_json_request(request, upstream_path: str):
 
     upstream_req = dict(proxy_req)
     upstream_req["model"] = route["upstream_model"]
+    if route["chat_template_kwargs"]:
+        upstream_req["chat_template_kwargs"] = route["chat_template_kwargs"]
+
+    start_ts = time.time()
+    redis = request.app["redis"]
+
+    await redis.publish(BROADCAST_CHANNEL, json.dumps({
+        "type": "conn_open",
+        "conn_id": request["conn_id"],
+        "remote": request.remote,
+        "path": request.path,
+        "authorization": "无",
+        "request_info": upstream_req,
+        "ts": int(start_ts * 1000)
+    }, ensure_ascii=False))
 
     session = request.app["client_session"]
     try:
@@ -331,6 +391,8 @@ async def proxy_json_request(request, upstream_path: str):
                     return web.json_response({"error": error_message}, status=502)
                 if request.path == "/v1/chat/completions":
                     request["response_preview"] = build_json_preview(result)
+                elif request.path == "/v1/responses":
+                    request["response_preview"] = get_response_preview(result)
                 await update_stats(
                     request.app["redis"],
                     success=True,
@@ -360,11 +422,15 @@ async def proxy_json_request(request, upstream_path: str):
                                 content = delta.get("content")
                                 if isinstance(content, str):
                                     stream_preview_parts.append(content)
+                        elif request.path == "/v1/responses" and payload.get("type") == "response.output_text.delta":
+                            delta = payload.get("delta")
+                            if isinstance(delta, str):
+                                stream_preview_parts.append(delta)
                     except (json.JSONDecodeError, KeyError):
                         pass
                 await response.write(chunk)
 
-            if request.path == "/v1/chat/completions" and stream_preview_parts:
+            if request.path in {"/v1/chat/completions", "/v1/responses"} and stream_preview_parts:
                 request["response_preview"] = "".join(stream_preview_parts)
             await update_stats(
                 request.app["redis"],
@@ -390,8 +456,92 @@ async def chat(request):
     return await proxy_json_request(request, "/v1/chat/completions")
 
 
+async def responses(request):
+    return await proxy_json_request(request, "/v1/responses")
+
+
 async def embeddings(request):
     return await proxy_json_request(request, "/v1/embeddings")
+
+
+async def build_mineru_form_data(request, backend: str) -> aiohttp.FormData:
+    form_data = aiohttp.FormData()
+
+    if request.content_type.startswith("multipart/"):
+        reader = await request.multipart()
+        while part := await reader.next():
+            if part.name == "backend":
+                await part.release()
+                continue
+            if part.filename:
+                field_options = {"filename": part.filename}
+                if content_type := part.headers.get("Content-Type"):
+                    field_options["content_type"] = content_type
+                form_data.add_field(
+                    part.name,
+                    await part.read(),
+                    **field_options,
+                )
+            else:
+                form_data.add_field(part.name, await part.text())
+    elif request.content_type == "application/x-www-form-urlencoded":
+        fields = await request.post()
+        for name, value in fields.items():
+            if name != "backend":
+                form_data.add_field(name, value)
+    else:
+        raise web.HTTPBadRequest(text="MinerU /file_parse expects form data")
+
+    form_data.add_field("backend", backend)
+    return form_data
+
+
+async def mineru_file_parse(request):
+    if MINERU_ROUTE is None:
+        error_message = "MinerU is not configured"
+        attach_proxy_error(request, "/file_parse", error_message, stage="mineru_route", status=503)
+        await update_stats(request.app["redis"], success=False)
+        return web.json_response({"error": error_message}, status=503)
+
+    try:
+        form_data = await build_mineru_form_data(request, MINERU_ROUTE["backend"])
+        headers = {}
+        if accept := request.headers.get("Accept"):
+            headers["Accept"] = accept
+
+        async with request.app["client_session"].post(
+            f"{MINERU_ROUTE['base_url']}/file_parse",
+            headers=headers,
+            data=form_data,
+            timeout=ClientTimeout(total=300),
+        ) as response:
+            response_body = await response.read()
+            content_type = response.headers.get("Content-Type", "application/octet-stream")
+            success = 200 <= response.status < 300
+            if "json" in content_type.lower():
+                try:
+                    request["response_preview"] = build_json_preview(json.loads(response_body))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    pass
+            if not success:
+                attach_proxy_error(
+                    request,
+                    "/file_parse",
+                    response_body.decode("utf-8", errors="replace")[:10_000],
+                    stage="mineru_response",
+                    status=response.status,
+                )
+            await update_stats(request.app["redis"], success=success)
+            return web.Response(status=response.status, body=response_body, headers={"Content-Type": content_type})
+    except web.HTTPException as exc:
+        attach_proxy_error(request, "/file_parse", exc.text, stage="mineru_request", status=exc.status)
+        await update_stats(request.app["redis"], success=False)
+        return web.json_response({"error": exc.text}, status=exc.status)
+    except Exception as exc:
+        error_message = f"MinerU proxy error: {exc}"
+        attach_proxy_error(request, "/file_parse", error_message, stage="mineru_proxy", status=502)
+        await update_stats(request.app["redis"], success=False)
+        return web.json_response({"error": error_message}, status=502)
 
 
 async def authorization_mappings(request):
@@ -458,9 +608,14 @@ async def cleanup(app):
     await app["client_session"].close()
 
 
-app = web.Application(middlewares=[conn_broadcast_middleware])
+app = web.Application(
+    middlewares=[conn_broadcast_middleware],
+    client_max_size=MAX_UPLOAD_SIZE,
+)
 app.router.add_post("/v1/chat/completions", chat)
+app.router.add_post("/v1/responses", responses)
 app.router.add_post("/v1/embeddings", embeddings)
+app.router.add_post("/file_parse", mineru_file_parse)
 app.router.add_get("/events", events)
 app.router.add_get("/authorization-mappings", authorization_mappings)
 app.router.add_post("/authorization-mappings", authorization_mappings)
