@@ -143,9 +143,11 @@ Content-Type: application/json
 
 - 非流式请求：直接返回上游 JSON 响应
 - 流式请求：以 `text/event-stream` 形式原样透传上游流
+- 流式聊天请求默认向上游发送 `stream_options.include_usage: true`；若上游不返回 usage，该次 token 记为 0
+- 如果上游不支持 `stream_options`，可在该模型配置中设置 `stream_include_usage: false`
 - 服务端会按请求里的 `model` 选择路由配置
 - 如果配置了 `upstream_model`，会把转发给上游的 `model` 改成该值
-- 成功时累计 token 统计
+- 成功时累计 token；已配置的客户端 Authorization 还会单独累计用量
 - 失败时累计失败次数
 
 ### `POST /v1/responses`
@@ -168,6 +170,7 @@ Content-Type: application/json
 - 支持 OpenAI Responses API 的普通 JSON 响应和 SSE 流式响应透传
 - 复用聊天模型的路由配置和 `upstream_model` 映射
 - 成功与失败调用都会写入既有 Redis 统计；监控页面会展示可提取的输出文本
+- 流式响应会从 `response.completed` 事件中的 `response.usage` 提取 token 用量
 
 ### `POST /v1/embeddings`
 
@@ -195,7 +198,7 @@ Content-Type: application/json
 - 非流式 JSON 请求，直接返回上游响应
 - 服务端会按请求里的 `model` 选择路由配置
 - 如果配置了 `upstream_model`，会把转发给上游的 `model` 改成该值
-- 成功时累计 token 统计
+- 成功时累计 token；已配置的客户端 Authorization 还会单独累计用量
 - 失败时累计失败次数
 
 ### `POST /file_parse`
@@ -242,11 +245,28 @@ Content-Type: text/event-stream
 ### `GET /monitor`
 
 用途：
-打开内置静态监控页面，页面会自动订阅 `/events` 并显示：
+打开内置静态监控页面。页面首次加载会从 `/stats` 读取本月累计值，随后订阅 `/events` 实时更新，并显示：
 
 - 代理错误数
 - 成功次数、失败次数、累计 token 数
+- 本月各已配置 Authorization 密钥的成功、失败和 token 数（以环境描述显示）
 - 最近 50 条事件
+
+密钥统计表格位于首页总数卡片下方，已配置密钥即使尚无请求也会显示 0。先在页面的密钥管理中保存 Authorization 和环境描述，再用相同的 `Authorization: Bearer <密钥>` 发起代理请求。未配置的密钥不显示在明细中，但其请求仍计入总数。
+
+“每日环境与项目用量”可选择日期与密钥，显示六项指标：Token 总用量、输入 Token、输出 Token、调用次数、调用成功率、平均响应时长。环境行包含其项目调用；项目行是该环境的明细，不要把环境和项目行再相加。创建项目时填写项目名称、独立的 Authorization 密钥，并选择所属环境；项目密钥调用会同时计入项目与环境。日期按北京时间、调用完成时间归档。
+
+输入/输出 Token 从上游返回的 `usage.prompt_tokens` / `usage.completion_tokens`，或 `usage.input_tokens` / `usage.output_tokens` 提取；总用量优先取 `usage.total_tokens`，缺少时才合计输入与输出。上游未返回某项 usage 时，该项记录为 0。调用次数为成功加失败；成功率为成功次数除以调用次数；平均响应时长为完成调用的耗时总和除以调用次数，流式调用包含整段流完成时间。旧月度统计无法还原这些新增的历史每日字段。
+
+匹配读取的是请求的 `Authorization` 请求头：`Bearer` 前缀大小写不敏感，前缀后的空格或制表符会被去掉；也支持直接发送裸密钥。其他认证方案（例如 `Token xxx`、`Basic xxx`）按完整请求头值匹配，配置时也要填完整值。`X-API-Key`、Cookie 等其他请求头不会参与此统计。
+
+### `GET /stats`
+
+返回当前月份的成功数、失败数、token 总数，以及 `by_authorization` 明细和 `authorizations` 环境描述映射。可用 `?date=YYYY-MM-DD` 读取指定日期；`daily.global`、`daily.environments`、`daily.projects` 包含六项指标所需的计数与派生字段，`daily.timezone` 为 `Asia/Shanghai`。明细字段使用密钥的 SHA-256 标识，不返回原始密钥。这个接口只读取 Redis，不会为了测试而增加计数。
+
+### `GET/POST/DELETE /project-mappings`
+
+管理项目密钥。创建或更新时提交 JSON：`{"authorization":"项目密钥","name":"项目名称","environment_authorization":"环境密钥"}`；删除时只需提交 `authorization`。项目密钥与环境密钥都从请求的 `Authorization` 头识别，项目绑定的环境不能直接改为其他环境。
 
 ## Redis 中的频道与键
 
@@ -261,6 +281,15 @@ Content-Type: text/event-stream
 - `llm:stats:fail`
 - `llm:stats:tokens`
 - `llm:stats:month`：当前统计所属月份，格式 `YYYY-MM`，跨月时会自动清空统计
+- `llm:stats:dimension:authorization:success` / `fail` / `tokens`：Redis Hash，字段为已配置密钥的 SHA-256 标识
+- `llm:stats:daily:YYYY-MM-DD:{success,fail,tokens,input_tokens,output_tokens,duration_ms}`：每日 Redis Hash，字段包含 `global`、`authorization:<密钥标识>` 和 `project:<密钥标识>`
+- `monitor:project:mappings`、`monitor:project:owners`：项目配置及其环境归属
+- `llm:stats:dimension:keys`：当前月份使用过的维度统计键集合，跨月时清空
+- `llm:stats:batch_ids`：本月已写入的批次标识，用于避免 Redis 重试时重复计数
+
+统计在请求协程中只做内存聚合，由后台任务批量写入 Redis 并发布 `stats_update`。
+事件保留原有总数字段，并增加 `by_authorization` 映射。以后增加统计维度时，可向统计记录器传入新的维度名和值；维度名会自动映射到对应的 Redis Hash。
+Redis 暂时不可用时后台任务会重试；服务退出时最多等待 5 秒完成写入。如果上游没有提供 token usage，就只能记录该次请求的成功或失败，无法准确推算 token。
 
 ## 本地运行
 
@@ -338,31 +367,11 @@ docker compose logs -f
 docker compose down
 ```
 
-## 关于当前 Compose 配置的重要说明
+## 查看当前代码的监控页面
 
-当前 [docker-compose.yml](./docker-compose.yml) 中，`model_proxy` 使用的是远程镜像：
+已有 Redis 和有效的 `model.yaml` 时，按上面的“本地运行”方式启动当前代码，然后打开 `http://localhost:8080/monitor`（直接运行 Python）或 `http://localhost:8000/monitor`（Gunicorn）。`/stats` 可直接查看当前密钥统计的 JSON。
 
-```yaml
-image: origin-hub-ai-registry.cn-shanghai.cr.aliyuncs.com/dataflow/model_proxy:v1.0.0
-```
-
-这意味着：
-
-- 你修改本地 `src/main.py` 后，`docker compose up` 不会自动用到本地最新代码
-- 如果日志里仍然出现旧依赖或旧启动命令，通常说明容器跑的还是远程旧镜像
-
-如果你希望 Compose 直接使用当前仓库代码，建议改成：
-
-```yaml
-model_proxy:
-  build: .
-```
-
-然后执行：
-
-```bash
-docker compose up --build
-```
+直接双击 `src/static/monitor.html` 无法访问代理接口。当前 [docker-compose.yml](./docker-compose.yml) 使用远程镜像 `model_proxy:v1.0.1`，不会自动包含本地代码修改；使用已有服务时，需确保实际运行的是更新后的代码。
 
 ## 常见问题
 
@@ -424,8 +433,7 @@ CMD ["gunicorn", "-w", "2", "-k", "aiohttp.GunicornWebWorker", "-b", "0.0.0.0:80
 
 ## 开发建议
 
-- 修改代码后，如果你使用的是远程镜像方式，需要重新构建并发布镜像
-- 如果你在本地频繁调试，建议把 Compose 改为 `build: .`
+- 修改代码后需重启运行当前代码的代理进程，浏览器刷新 `/monitor` 查看新页面
 - 上游模型地址建议只填基础域名，不要重复拼接 `/v1/chat/completions` 或 `/v1/embeddings`
 
 ## 许可证

@@ -1,15 +1,23 @@
+import asyncio
 import os
+import re
 import time
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 import aiohttp
 import yaml
 from redis.asyncio import Redis
-from redis.exceptions import WatchError
 from aiohttp import web, ClientSession, ClientTimeout
+from .stats import StatsRecorder, get_stats_snapshot, extract_usage, usage_counts
+from .key_registry import (
+    AUTHORIZATION_MAPPING_KEY, PROJECT_MAPPING_KEY, normalize_authorization,
+    authorization_stats_id, get_authorization_mappings, get_project_mappings,
+    get_authorization_context, mutate_registry,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,8 +26,9 @@ SUCCESS_COUNT_KEY = "llm:stats:success"
 FAIL_COUNT_KEY = "llm:stats:fail"
 TOTAL_TOKENS_KEY = "llm:stats:tokens"
 STATS_MONTH_KEY = "llm:stats:month"
+STATS_DIMENSION_KEYS = "llm:stats:dimension:keys"
+STATS_BATCH_IDS = "llm:stats:batch_ids"
 REALTIME_STATS_CHANNEL = "llm:stats:realtime"
-AUTHORIZATION_MAPPING_KEY = "monitor:authorization:mappings"
 PROXY_REQUEST_PATHS = {"/v1/chat/completions", "/v1/responses", "/v1/embeddings", "/file_parse"}
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "model.yaml"
@@ -71,6 +80,7 @@ def load_model_config() -> dict:
         style = normalize_model_style(model_config.get("style"))
         upstream_model = model_config.get("upstream_model") or request_model
         chat_template_kwargs = model_config.get("chat_template_kwargs") or {}
+        stream_include_usage = model_config.get("stream_include_usage", True)
 
         if not base_url:
             raise RuntimeError(f"Model '{request_model}' missing base_url")
@@ -82,6 +92,8 @@ def load_model_config() -> dict:
             raise RuntimeError(f"Model '{request_model}' missing api_key")
         if not isinstance(chat_template_kwargs, dict):
             raise RuntimeError(f"Model '{request_model}' extra_params must be a mapping")
+        if not isinstance(stream_include_usage, bool):
+            raise RuntimeError(f"Model '{request_model}' stream_include_usage must be a boolean")
 
         models[request_model] = {
             "api_key": api_key,
@@ -89,6 +101,7 @@ def load_model_config() -> dict:
             "style": style,
             "upstream_model": upstream_model,
             "chat_template_kwargs": dict(chat_template_kwargs),
+            "stream_include_usage": stream_include_usage,
             "backend": str(model_config.get("backend") or DEFAULT_MINERU_BACKEND),
         }
 
@@ -155,63 +168,20 @@ def get_response_preview(payload) -> str:
     return "".join(text_parts) or build_json_preview(payload)
 
 
-def get_current_stats_month() -> str:
-    return time.strftime("%Y-%m", time.localtime())
-
-
-async def ensure_monthly_stats(redis):
-    current_month = get_current_stats_month()
-
-    while True:
-        try:
-            async with redis.pipeline() as pipe:
-                await pipe.watch(STATS_MONTH_KEY)
-                stats_month = await pipe.get(STATS_MONTH_KEY)
-
-                if stats_month == current_month:
-                    await pipe.reset()
-                    return
-
-                pipe.multi()
-                pipe.set(STATS_MONTH_KEY, current_month)
-                pipe.set(SUCCESS_COUNT_KEY, 0)
-                pipe.set(FAIL_COUNT_KEY, 0)
-                pipe.set(TOTAL_TOKENS_KEY, 0)
-                await pipe.execute()
-                return
-        except WatchError:
-            continue
-
-
-async def update_stats(redis, success: bool, tokens: int = 0):
-    await ensure_monthly_stats(redis)
-
-    pipe = redis.pipeline()
-    pipe.incr(SUCCESS_COUNT_KEY) if success else pipe.incr(FAIL_COUNT_KEY)
-    if tokens > 0:
-        pipe.incrby(TOTAL_TOKENS_KEY, tokens)
-    else:
-        pipe.incrby(TOTAL_TOKENS_KEY, 0)
-    pipe.get(SUCCESS_COUNT_KEY)
-    pipe.get(FAIL_COUNT_KEY)
-    pipe.get(TOTAL_TOKENS_KEY)
-
-    _, _, s_cnt, f_cnt, t_tokens = await pipe.execute()
-    await redis.publish(REALTIME_STATS_CHANNEL, json.dumps({
-        "type": "stats_update",
-        "success_count": int(s_cnt or 0),
-        "fail_count": int(f_cnt or 0),
-        "total_tokens": int(t_tokens or 0),
-        "ts": int(time.time() * 1000)
-    }, ensure_ascii=False))
-
-
-async def get_authorization_mappings(redis) -> list[dict[str, str]]:
-    mappings = await redis.hgetall(AUTHORIZATION_MAPPING_KEY)
-    return [
-        {"authorization": authorization, "description": description}
-        for authorization, description in sorted(mappings.items())
-    ]
+def record_stats(request, success: bool, usage=None):
+    if request.get("stats_recorded"):
+        return
+    dimensions = {}
+    if authorization_id := request.get("stats_authorization_id"):
+        dimensions["authorization"] = authorization_id
+    if project_id := request.get("stats_project_id"):
+        dimensions["project"] = project_id
+    total, input_tokens, output_tokens = usage_counts(usage)
+    duration_ms = max(0, int((time.monotonic() - request["stats_start_ts"]) * 1000))
+    request.app["stats"].record(success, total, dimensions,
+                                input_tokens=input_tokens, output_tokens=output_tokens,
+                                duration_ms=duration_ms)
+    request["stats_recorded"] = True
 
 
 async def publish_authorization_mappings(redis):
@@ -222,11 +192,12 @@ async def publish_authorization_mappings(redis):
     }, ensure_ascii=False))
 
 
-async def get_authorization_description(redis, authorization: str | None) -> str | None:
-    if not authorization:
-        return None
-    authorization = authorization.replace('Bearer ', '')
-    return await redis.hget(AUTHORIZATION_MAPPING_KEY, authorization)
+async def publish_project_mappings(redis):
+    await redis.publish(BROADCAST_CHANNEL, json.dumps({
+        "type": "project_mappings_update",
+        "mappings": await get_project_mappings(redis),
+        "ts": int(time.time() * 1000),
+    }, ensure_ascii=False))
 
 
 def attach_proxy_error(
@@ -243,74 +214,87 @@ def attach_proxy_error(
     request["close_upstream_path"] = upstream_path
 
 
+def publish_broadcast_background(app, payload):
+    task = asyncio.create_task(app["redis"].publish(
+        BROADCAST_CHANNEL, json.dumps(payload, ensure_ascii=False)
+    ))
+    app["broadcast_tasks"].add(task)
+
+    def completed(done):
+        app["broadcast_tasks"].discard(done)
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logging.exception("Connection event publish failed")
+
+    task.add_done_callback(completed)
+
+
 @web.middleware
 async def conn_broadcast_middleware(request, handler):
-    if request.path in {"/events", "/authorization-mappings"}:
+    if request.path not in PROXY_REQUEST_PATHS or request.method != "POST":
         return await handler(request)
 
-    start_ts = time.time()
+    request["stats_start_ts"] = time.monotonic()
     conn_id = uuid4().hex
     request["conn_id"] = conn_id
     redis = request.app["redis"]
-    authorization_description = await get_authorization_description(
-        redis,
-        request.headers.get("Authorization"),
-    )
-    proxy_req = None
-
-    # 只处理代理接口的请求，提前缓存请求体并强制模型
-    if request.path == "/file_parse" and request.method == "POST":
-        proxy_req = {
-            "service": "mineru",
-            "backend": MINERU_ROUTE["backend"] if MINERU_ROUTE else "-",
-        }
-        request["proxy_req"] = proxy_req
-    elif request.path in PROXY_REQUEST_PATHS and request.method == "POST":
-        proxy_req = await request.json()
-        # 尝试转化schema
-        if 'response_format' in proxy_req:
-            if 'json_schema' in proxy_req['response_format']:
-                if 'schema' in proxy_req['response_format']['json_schema']:
-                    if isinstance(proxy_req['response_format']['json_schema']['schema'], str):
-                        try:
-                            proxy_req['response_format']['json_schema']['schema'] = json.loads(
-                                proxy_req['response_format']['json_schema']['schema'])
-                        except KeyError:
-                            pass
-        request["proxy_req"] = proxy_req
-
-    await redis.publish(BROADCAST_CHANNEL, json.dumps({
-        "type": "conn_open",
-        "conn_id": conn_id,
-        "remote": request.remote,
-        "path": request.path,
-        "authorization": authorization_description or "未配置",
-        "request_info": proxy_req,
-        "ts": int(start_ts * 1000)
-    }, ensure_ascii=False))
-
+    authorization_description = None
     status = 500
     try:
-        resp = await handler(request)
-        status = resp.status
-    except Exception:
-        raise
-    finally:
+        authorization_description, context = await get_authorization_context(
+            redis, request.headers.get("Authorization"))
+        if context:
+            request["stats_authorization_id"] = authorization_stats_id(context["environment_authorization"])
+            if context.get("project"):
+                request["stats_project_id"] = authorization_stats_id(context["authorization"])
+
+        if request.path == "/file_parse":
+            proxy_req = {"service": "mineru", "backend": MINERU_ROUTE["backend"] if MINERU_ROUTE else "-"}
+        else:
+            try:
+                proxy_req = await request.json()
+            except (ValueError, aiohttp.ContentTypeError):
+                raise web.HTTPBadRequest(text="Invalid JSON body")
+            if not isinstance(proxy_req, dict):
+                raise web.HTTPBadRequest(text="JSON body must be an object")
+            response_format = proxy_req.get("response_format")
+            if isinstance(response_format, dict):
+                schema = response_format.get("json_schema")
+                if isinstance(schema, dict) and isinstance(schema.get("schema"), str):
+                    try:
+                        schema["schema"] = json.loads(schema["schema"])
+                    except ValueError:
+                        raise web.HTTPBadRequest(text="Invalid response_format schema")
+        request["proxy_req"] = proxy_req
+
         await redis.publish(BROADCAST_CHANNEL, json.dumps({
-            "type": "conn_close",
-            "conn_id": conn_id,
-            "remote": request.remote,
-            "path": request.path,
-            "authorization": authorization_description or "未配置",
+            "type": "conn_open", "conn_id": conn_id, "remote": request.remote,
+            "path": request.path, "authorization": authorization_description or "未配置",
+            "request_info": proxy_req, "ts": int(time.time() * 1000),
+        }, ensure_ascii=False))
+        response = await handler(request)
+        status = response.status
+        return response
+    except web.HTTPException as exc:
+        status = exc.status
+        attach_proxy_error(request, request.path, exc.text, stage="request", status=status)
+        return web.json_response({"error": exc.text}, status=status)
+    finally:
+        if not request.get("stats_recorded"):
+            record_stats(request, success=200 <= status < 300)
+        publish_broadcast_background(request.app, {
+            "type": "conn_close", "conn_id": conn_id, "remote": request.remote,
+            "path": request.path, "authorization": authorization_description or "未配置",
             "status": request.get("close_error_status", status),
-            "stage": request.get("close_error_stage"),
-            "error": request.get("close_error"),
+            "stage": request.get("close_error_stage"), "error": request.get("close_error"),
             "upstream_path": request.get("close_upstream_path"),
             "response_preview": request.get("response_preview"),
-            "cost_ms": int((time.time() - start_ts) * 1000),
-            "ts": int(time.time() * 1000)
-        }, ensure_ascii=False))
-    return resp
+            "cost_ms": int((time.monotonic() - request["stats_start_ts"]) * 1000),
+            "upstream_ms": request.get("upstream_ms"), "ts": int(time.time() * 1000),
+        })
 
 
 async def proxy_json_request(request, upstream_path: str):
@@ -330,28 +314,25 @@ async def proxy_json_request(request, upstream_path: str):
             stage="model_route",
             status=route_status,
         )
-        await update_stats(request.app["redis"], success=False)
+        record_stats(request, success=False)
         return web.json_response({"error": route_error}, status=route_status)
 
     upstream_req = dict(proxy_req)
     upstream_req["model"] = route["upstream_model"]
+    if upstream_req.get("stream") and request.path == "/v1/chat/completions" and route["stream_include_usage"]:
+        stream_options = upstream_req.get("stream_options")
+        if stream_options is None:
+            stream_options = {}
+            upstream_req["stream_options"] = stream_options
+        if isinstance(stream_options, dict):
+            stream_options = dict(stream_options)
+            upstream_req["stream_options"] = stream_options
+            stream_options.setdefault("include_usage", True)
     if route["chat_template_kwargs"]:
         upstream_req["chat_template_kwargs"] = route["chat_template_kwargs"]
 
-    start_ts = time.time()
-    redis = request.app["redis"]
-
-    await redis.publish(BROADCAST_CHANNEL, json.dumps({
-        "type": "conn_open",
-        "conn_id": request["conn_id"],
-        "remote": request.remote,
-        "path": request.path,
-        "authorization": "无",
-        "request_info": upstream_req,
-        "ts": int(start_ts * 1000)
-    }, ensure_ascii=False))
-
     session = request.app["client_session"]
+    upstream_start_ts = time.monotonic()
     try:
         async with session.post(
                 f"{route['base_url']}{upstream_path}",
@@ -368,7 +349,7 @@ async def proxy_json_request(request, upstream_path: str):
                     stage="upstream_response",
                     status=resp.status,
                 )
-                await update_stats(request.app["redis"], success=False)
+                record_stats(request, success=False)
                 return web.json_response(
                     {"error": error_message},
                     status=resp.status
@@ -387,20 +368,16 @@ async def proxy_json_request(request, upstream_path: str):
                         stage="response_parse",
                         status=502,
                     )
-                    await update_stats(request.app["redis"], success=False)
+                    record_stats(request, success=False)
                     return web.json_response({"error": error_message}, status=502)
                 if request.path == "/v1/chat/completions":
                     request["response_preview"] = build_json_preview(result)
                 elif request.path == "/v1/responses":
                     request["response_preview"] = get_response_preview(result)
-                await update_stats(
-                    request.app["redis"],
-                    success=True,
-                    tokens=result.get("usage", {}).get("total_tokens", 0)
-                )
+                record_stats(request, success=True, usage=result)
                 return web.json_response(result)
 
-            # 流式逻辑完全不变
+            # 透传上游流，并从事件中提取 usage。
             response = web.StreamResponse(
                 status=resp.status,
                 headers={"Content-Type": "text/event-stream; charset=utf-8"},
@@ -408,14 +385,20 @@ async def proxy_json_request(request, upstream_path: str):
             await response.prepare(request)
 
             last_usage = None
+            stream_failed = False
             stream_preview_parts = []
             async for chunk in resp.content:
                 chunk_str = chunk.decode("utf-8", errors="ignore")
-                if "data: " in chunk_str and "[DONE]" not in chunk_str:
+                data = chunk_str.lstrip()
+                if data.startswith("data:") and data[5:].strip() != "[DONE]":
                     try:
-                        payload = json.loads(chunk_str.split("data: ")[-1].strip())
-                        if "usage" in payload:
-                            last_usage = payload["usage"]
+                        payload = json.loads(data[5:].strip())
+                        if not isinstance(payload, dict):
+                            payload = {}
+                        if payload.get("error") or payload.get("type") in {"error", "response.failed", "response.incomplete"}:
+                            stream_failed = True
+                        if usage := extract_usage(payload):
+                            last_usage = usage
                         if request.path == "/v1/chat/completions":
                             for choice in payload.get("choices", []):
                                 delta = choice.get("delta", {})
@@ -432,12 +415,10 @@ async def proxy_json_request(request, upstream_path: str):
 
             if request.path in {"/v1/chat/completions", "/v1/responses"} and stream_preview_parts:
                 request["response_preview"] = "".join(stream_preview_parts)
-            await update_stats(
-                request.app["redis"],
-                success=True,
-                tokens=last_usage.get("total_tokens", 0) if last_usage else 0
-            )
             await response.write_eof()
+            if stream_failed:
+                attach_proxy_error(request, upstream_path, "Upstream stream reported an error", stage="upstream_stream", status=502)
+            record_stats(request, success=not stream_failed, usage=last_usage)
             return response
 
     except Exception as exc:
@@ -448,8 +429,10 @@ async def proxy_json_request(request, upstream_path: str):
             stage="proxy_exception",
             status=500,
         )
-        await update_stats(request.app["redis"], success=False)
+        record_stats(request, success=False)
         return web.json_response({"error": "Internal error"}, status=500)
+    finally:
+        request["upstream_ms"] = int((time.monotonic() - upstream_start_ts) * 1000)
 
 
 async def chat(request):
@@ -500,7 +483,7 @@ async def mineru_file_parse(request):
     if MINERU_ROUTE is None:
         error_message = "MinerU is not configured"
         attach_proxy_error(request, "/file_parse", error_message, stage="mineru_route", status=503)
-        await update_stats(request.app["redis"], success=False)
+        record_stats(request, success=False)
         return web.json_response({"error": error_message}, status=503)
 
     try:
@@ -531,16 +514,16 @@ async def mineru_file_parse(request):
                     stage="mineru_response",
                     status=response.status,
                 )
-            await update_stats(request.app["redis"], success=success)
+            record_stats(request, success=success)
             return web.Response(status=response.status, body=response_body, headers={"Content-Type": content_type})
     except web.HTTPException as exc:
         attach_proxy_error(request, "/file_parse", exc.text, stage="mineru_request", status=exc.status)
-        await update_stats(request.app["redis"], success=False)
+        record_stats(request, success=False)
         return web.json_response({"error": exc.text}, status=exc.status)
     except Exception as exc:
         error_message = f"MinerU proxy error: {exc}"
         attach_proxy_error(request, "/file_parse", error_message, stage="mineru_proxy", status=502)
-        await update_stats(request.app["redis"], success=False)
+        record_stats(request, success=False)
         return web.json_response({"error": error_message}, status=502)
 
 
@@ -558,20 +541,62 @@ async def authorization_mappings(request):
     authorization = payload.get("authorization") if isinstance(payload, dict) else None
     if not isinstance(authorization, str) or not authorization.strip():
         return web.json_response({"error": "authorization is required"}, status=400)
-    authorization = authorization.strip()
+    authorization = normalize_authorization(authorization)
+    if not authorization:
+        return web.json_response({"error": "authorization is required"}, status=400)
 
     if request.method == "POST":
         description = payload.get("description")
         if not isinstance(description, str) or not description.strip():
             return web.json_response({"error": "description is required"}, status=400)
-        await redis.hset(AUTHORIZATION_MAPPING_KEY, authorization, description.strip())
+        result = await mutate_registry(redis, "save_environment", authorization, description.strip())
     elif request.method == "DELETE":
-        await redis.hdel(AUTHORIZATION_MAPPING_KEY, authorization)
+        result = await mutate_registry(redis, "delete_environment", authorization)
     else:
         return web.json_response({"error": "Method not allowed"}, status=405)
 
+    if result != "ok":
+        message = {"project_key": "该密钥已用于项目，请使用另一个环境密钥", "has_projects": "请先删除该环境下的项目"}.get(result, "环境配置失败")
+        return web.json_response({"error": message}, status=409)
+
     await publish_authorization_mappings(redis)
     return web.json_response({"mappings": await get_authorization_mappings(redis)})
+
+
+async def project_mappings(request):
+    redis = request.app["redis"]
+    if request.method == "GET":
+        return web.json_response({"mappings": await get_project_mappings(redis)})
+    try:
+        payload = await request.json()
+    except (aiohttp.ContentTypeError, json.JSONDecodeError):
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+    if not isinstance(payload, dict):
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+    authorization = normalize_authorization(payload.get("authorization"))
+    if not authorization:
+        return web.json_response({"error": "authorization is required"}, status=400)
+    if request.method == "POST":
+        name = payload.get("name")
+        environment = normalize_authorization(payload.get("environment_authorization"))
+        if not isinstance(name, str) or not name.strip() or not environment:
+            return web.json_response({"error": "name and environment are required"}, status=400)
+        result = await mutate_registry(redis, "save_project", authorization, json.dumps({
+            "name": name.strip(), "environment_authorization": environment,
+        }, ensure_ascii=False), environment)
+    elif request.method == "DELETE":
+        result = await mutate_registry(redis, "delete_project", authorization)
+    else:
+        return web.json_response({"error": "Method not allowed"}, status=405)
+    if result != "ok":
+        message = {
+            "missing_environment": "所属环境不存在，请先创建环境",
+            "environment_key": "该密钥已用于环境，请使用另一个项目密钥",
+            "different_environment": "项目密钥的所属环境不可更换，请为新环境创建新的项目密钥",
+        }.get(result, "项目配置失败")
+        return web.json_response({"error": message}, status=409)
+    await publish_project_mappings(redis)
+    return web.json_response({"mappings": await get_project_mappings(redis)})
 
 
 async def events(request):
@@ -594,16 +619,57 @@ async def events(request):
     return resp
 
 
+async def stats(request):
+    mappings = await get_authorization_mappings(request.app["redis"])
+    environment_keys = {item["authorization"] for item in mappings}
+    projects = await get_project_mappings(request.app["redis"], environment_keys)
+    labels = {authorization_stats_id(item["authorization"]): item["description"] for item in mappings}
+    project_labels = {authorization_stats_id(item["authorization"]): {
+        "name": item["name"],
+        "environment_id": authorization_stats_id(item["environment_authorization"]),
+    } for item in projects}
+    day = request.query.get("date")
+    if day:
+        try:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or datetime.strptime(day, "%Y-%m-%d").strftime("%Y-%m-%d") != day:
+                raise ValueError
+        except ValueError:
+            return web.json_response({"error": "date must be YYYY-MM-DD"}, status=400)
+    snapshot = await get_stats_snapshot(
+        request.app["redis"],
+        [STATS_MONTH_KEY, SUCCESS_COUNT_KEY, FAIL_COUNT_KEY, TOTAL_TOKENS_KEY],
+        labels,
+        project_labels,
+        day,
+    )
+    return web.json_response(snapshot, headers={"Cache-Control": "no-store"})
+
+
 async def monitor(request):
     return web.FileResponse(STATIC_DIR / "monitor.html")
 
 
 async def startup(app):
     app["redis"] = Redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+    app["broadcast_tasks"] = set()
     app["client_session"] = ClientSession(timeout=ClientTimeout(total=300))
+    app["stats"] = StatsRecorder(
+        app["redis"],
+        [STATS_MONTH_KEY, SUCCESS_COUNT_KEY, FAIL_COUNT_KEY, TOTAL_TOKENS_KEY,
+         STATS_DIMENSION_KEYS, STATS_BATCH_IDS],
+        REALTIME_STATS_CHANNEL,
+    )
+    app["stats"].start()
 
 
 async def cleanup(app):
+    await app["stats"].close()
+    if app["broadcast_tasks"]:
+        _, pending = await asyncio.wait(app["broadcast_tasks"], timeout=2)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
     await app["redis"].close()
     await app["client_session"].close()
 
@@ -617,9 +683,13 @@ app.router.add_post("/v1/responses", responses)
 app.router.add_post("/v1/embeddings", embeddings)
 app.router.add_post("/file_parse", mineru_file_parse)
 app.router.add_get("/events", events)
+app.router.add_get("/stats", stats)
 app.router.add_get("/authorization-mappings", authorization_mappings)
 app.router.add_post("/authorization-mappings", authorization_mappings)
 app.router.add_delete("/authorization-mappings", authorization_mappings)
+app.router.add_get("/project-mappings", project_mappings)
+app.router.add_post("/project-mappings", project_mappings)
+app.router.add_delete("/project-mappings", project_mappings)
 app.router.add_get("/", monitor)
 app.router.add_get("/monitor", monitor)
 

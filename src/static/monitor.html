@@ -221,6 +221,60 @@
       line-height: 1.5;
     }
 
+    .model-panel {
+      margin-bottom: 24px;
+    }
+
+    .model-table-scroll {
+      overflow-x: auto;
+    }
+
+    .model-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 580px;
+    }
+
+    .model-table th,
+    .model-table td {
+      padding: 14px 12px;
+      text-align: right;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .model-table th:first-child,
+    .model-table td:first-child {
+      text-align: left;
+    }
+
+    .model-table tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .model-table th {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .model-table .model-name {
+      font-weight: 700;
+      word-break: break-word;
+    }
+
+    .model-table .token-value {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .daily-controls { display: flex; align-items: center; gap: 10px; }
+    .daily-table { min-width: 1050px; }
+    .daily-table .project-name { padding-left: 28px; font-weight: 500; }
+    .daily-metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+    .daily-metric { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, 0.58); }
+    .daily-metric-label { color: var(--muted); font-size: 14px; }
+    .daily-metric-value { margin-top: 9px; color: var(--text); font-size: 26px; font-weight: 700; }
+    @media (max-width: 700px) { .daily-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .daily-controls { flex-wrap: wrap; } }
+
     .badge {
       display: inline-flex;
       align-items: center;
@@ -536,6 +590,28 @@
         border-radius: 20px;
       }
     }
+
+    .project-form {
+      display: flex;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      align-items: stretch;
+    }
+
+    .project-form .key-input {
+      width: auto;
+      min-width: 0;
+      flex: 1 0 140px;
+    }
+
+    .project-form #projectAuthorizationInput {
+      flex: 2 0 200px;
+    }
+
+    .project-form .key-button {
+      flex: 0 0 auto;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -545,8 +621,8 @@
         <div class="eyebrow">Realtime SSE Monitor</div>
         <h1>连接监控<br>一眼看清</h1>
         <p class="subtext">
-          这个页面会直接订阅 <span class="mono">/events</span>，实时更新错误、成功失败次数和 token 统计。
-          页面刷新后会重新建立订阅，不依赖额外接口。
+          页面会从 <span class="mono">/stats</span> 读取本月累计，再订阅 <span class="mono">/events</span> 更新连接和统计。
+          下方可直接查看每个已配置密钥的 token、成功和失败次数。
         </p>
       </div>
       <div class="hero-card status-card">
@@ -598,6 +674,29 @@
       </article>
     </section>
 
+    <section class="panel model-panel" aria-labelledby="modelStatsTitle">
+      <div class="panel-head">
+        <div>
+          <h2 id="modelStatsTitle">本月密钥用量</h2>
+          <div class="panel-copy">按请求中的 Authorization 统计，以配置的环境描述显示；token 取自上游返回的 usage。</div>
+        </div>
+        <div class="panel-copy" id="modelStatsMeta">正在读取统计...</div>
+      </div>
+      <div class="model-table-scroll" id="modelStats">正在读取统计...</div>
+    </section>
+
+    <section class="panel model-panel" aria-labelledby="dailyStatsTitle">
+      <div class="panel-head">
+        <div>
+          <h2 id="dailyStatsTitle">每日环境与项目用量</h2>
+          <div class="panel-copy">按北京时间归档；环境包含其项目用量，项目行是明细。全部调用包含未配置密钥；成功率和平均时长包含成功与失败调用。</div>
+        </div>
+        <div class="daily-controls"><label for="dailyDate">日期</label><input id="dailyDate" class="key-input" type="date"><label for="dailyTarget">密钥</label><select id="dailyTarget" class="key-input"><option value="global">全部调用</option></select></div>
+      </div>
+      <div id="dailyMetrics" class="daily-metric-grid" aria-live="polite"></div>
+      <div class="model-table-scroll" id="dailyStats">正在读取统计...</div>
+    </section>
+
     <section class="grid">
       <article class="panel">
         <div class="panel-head">
@@ -624,6 +723,7 @@
           <ul id="statsList" class="event-list"></ul>
         </div>
         <div id="keysPanel" class="tab-panel" role="tabpanel" aria-labelledby="keysTab" hidden>
+          <h3>环境密钥</h3>
           <form id="keyForm" class="key-form">
             <button id="generateAuthorizationButton" class="key-button" type="button">生成</button>
             <input id="authorizationInput" class="key-input mono" name="authorization" placeholder="Authorization 内容，例如 Bearer sk-..." required autocomplete="off">
@@ -632,6 +732,16 @@
           </form>
           <div class="panel-copy">保存同一个 Authorization 会更新其描述。连接事件只显示描述，不展示原始 Authorization。</div>
           <div id="keyMappingList" class="key-mapping-list"></div>
+          <h3>项目密钥</h3>
+          <form id="projectForm" class="key-form project-form">
+            <button id="generateProjectAuthorizationButton" class="key-button" type="button">生成</button>
+            <input id="projectAuthorizationInput" class="key-input mono" name="authorization" placeholder="项目 Authorization 密钥" required autocomplete="off">
+            <input id="projectNameInput" class="key-input" name="name" placeholder="项目名称" required>
+            <select id="projectEnvironmentInput" class="key-input" name="environment_authorization" required><option value="">选择所属环境</option></select>
+            <button class="key-button" type="submit">保存项目</button>
+          </form>
+          <div class="panel-copy">项目使用自己的 Authorization 密钥调用；创建时选择所属环境，调用会同时计入项目和环境。</div>
+          <div id="projectMappingList" class="key-mapping-list"></div>
         </div>
       </article>
     </section>
@@ -643,10 +753,24 @@
       selectedConnId: null,
       statsEvents: [],
       authorizationMappings: [],
+      projectMappings: [],
+      authorizationLabels: {},
+      projectLabels: {},
+      daily: null,
+      dailyError: null,
+      dailyRefreshTimer: null,
+      dailyRefreshNeeded: false,
+      snapshotRequestId: 0,
+      statsLoaded: false,
+      statsError: null,
+      statsRevision: 0,
       stats: {
         successCount: 0,
         failCount: 0,
-        totalTokens: 0
+        totalTokens: 0,
+        byAuthorization: {},
+        month: null,
+        ts: null
       },
       errorCount: 0
     };
@@ -668,11 +792,23 @@
       connectionFilterList: document.getElementById("connectionFilterList"),
       connectionList: document.getElementById("connectionList"),
       statsList: document.getElementById("statsList"),
+      modelStats: document.getElementById("modelStats"),
+      modelStatsMeta: document.getElementById("modelStatsMeta"),
+      dailyDate: document.getElementById("dailyDate"),
+      dailyTarget: document.getElementById("dailyTarget"),
+      dailyMetrics: document.getElementById("dailyMetrics"),
+      dailyStats: document.getElementById("dailyStats"),
       keyForm: document.getElementById("keyForm"),
       authorizationInput: document.getElementById("authorizationInput"),
       generateAuthorizationButton: document.getElementById("generateAuthorizationButton"),
       descriptionInput: document.getElementById("descriptionInput"),
-      keyMappingList: document.getElementById("keyMappingList")
+      keyMappingList: document.getElementById("keyMappingList"),
+      projectForm: document.getElementById("projectForm"),
+      projectAuthorizationInput: document.getElementById("projectAuthorizationInput"),
+      projectNameInput: document.getElementById("projectNameInput"),
+      projectEnvironmentInput: document.getElementById("projectEnvironmentInput"),
+      generateProjectAuthorizationButton: document.getElementById("generateProjectAuthorizationButton"),
+      projectMappingList: document.getElementById("projectMappingList")
     };
 
     function formatTime(ts) {
@@ -746,9 +882,86 @@
 
     function renderStats() {
       nodes.errorCount.textContent = String(state.errorCount);
-      nodes.successCount.textContent = String(state.stats.successCount);
-      nodes.failCount.textContent = String(state.stats.failCount);
-      nodes.tokenCount.textContent = String(state.stats.totalTokens);
+      nodes.successCount.textContent = Number(state.stats.successCount).toLocaleString("zh-CN");
+      nodes.failCount.textContent = Number(state.stats.failCount).toLocaleString("zh-CN");
+      nodes.tokenCount.textContent = Number(state.stats.totalTokens).toLocaleString("zh-CN");
+
+      const authorizationIds = Object.keys(state.authorizationLabels);
+      authorizationIds.sort((a, b) => {
+        const tokenDifference = (state.stats.byAuthorization[b]?.tokens || 0) - (state.stats.byAuthorization[a]?.tokens || 0);
+        return tokenDifference || state.authorizationLabels[a].localeCompare(state.authorizationLabels[b], "zh-CN");
+      });
+      nodes.modelStatsMeta.textContent = state.statsLoaded
+        ? `${state.stats.month || "本月"} · 更新于 ${formatTime(state.stats.ts)}`
+        : (state.statsError || "正在读取统计...");
+      if (!state.statsLoaded) {
+        nodes.modelStats.textContent = state.statsError || "正在读取统计...";
+        return;
+      }
+      if (!authorizationIds.length) {
+        nodes.modelStats.textContent = "尚未配置密钥";
+        return;
+      }
+      nodes.modelStats.innerHTML = `
+        <table class="model-table">
+          <thead><tr><th scope="col">环境描述</th><th scope="col">成功</th><th scope="col">失败</th><th scope="col">累计 Tokens</th></tr></thead>
+          <tbody>${authorizationIds.map((id) => {
+            const counts = state.stats.byAuthorization[id] || {};
+            return `<tr><td class="model-name">${escapeHtml(state.authorizationLabels[id])}</td><td>${Number(counts.success || 0).toLocaleString("zh-CN")}</td><td>${Number(counts.fail || 0).toLocaleString("zh-CN")}</td><td class="token-value">${Number(counts.tokens || 0).toLocaleString("zh-CN")}</td></tr>`;
+          }).join("")}</tbody>
+        </table>`;
+    }
+
+    function renderDailyStats() {
+      const selectedTarget = nodes.dailyTarget.value || "global";
+      const options = ['<option value="global">全部调用</option>'];
+      for (const [id, label] of Object.entries(state.authorizationLabels)) {
+        options.push(`<option value="environment:${escapeHtml(id)}">环境 · ${escapeHtml(label)}</option>`);
+        for (const [projectId, project] of Object.entries(state.projectLabels)) {
+          if (project.environment_id === id) {
+            options.push(`<option value="project:${escapeHtml(projectId)}">项目 · ${escapeHtml(label)} / ${escapeHtml(project.name)}</option>`);
+          }
+        }
+      }
+      nodes.dailyTarget.innerHTML = options.join("");
+      nodes.dailyTarget.value = selectedTarget;
+      if (!nodes.dailyTarget.value) nodes.dailyTarget.value = "global";
+      if (!state.daily) {
+        nodes.dailyMetrics.innerHTML = "";
+        nodes.dailyStats.textContent = state.dailyError || state.statsError || "正在读取统计...";
+        return;
+      }
+      const number = (value) => Number(value || 0).toLocaleString("zh-CN");
+      const [kind, id] = nodes.dailyTarget.value.split(":");
+      const selectedCounts = kind === "environment" ? state.daily.environments?.[id]
+        : kind === "project" ? state.daily.projects?.[id] : state.daily.global;
+      const selected = selectedCounts || state.daily.global || {};
+      const metrics = [
+        ["Token 总用量", number(selected.tokens)],
+        ["输入 Token", number(selected.input_tokens)],
+        ["输出 Token", number(selected.output_tokens)],
+        ["调用次数", number(selected.calls ?? (Number(selected.success || 0) + Number(selected.fail || 0)))],
+        ["调用成功率", selected.success_rate == null ? "—" : `${Number(selected.success_rate).toFixed(2)}%`],
+        ["平均响应时长", selected.avg_duration_ms == null ? "—" : `${(Number(selected.avg_duration_ms) / 1000).toFixed(2)} 秒`]
+      ];
+      nodes.dailyMetrics.innerHTML = metrics.map(([label, value]) =>
+        `<div class="daily-metric"><div class="daily-metric-label">${label}</div><div class="daily-metric-value">${value}</div></div>`).join("");
+      function row(name, counts = {}, isProject = false) {
+        const calls = Number(counts.success || 0) + Number(counts.fail || 0);
+        const rate = calls ? `${(Number(counts.success || 0) * 100 / calls).toFixed(1)}%` : "—";
+        const average = calls ? `${(Number(counts.duration_ms || 0) / calls).toFixed(1)} ms` : "—";
+        return `<tr><td class="${isProject ? "project-name" : "model-name"}">${escapeHtml(name)}</td><td>${number(calls)}</td><td>${number(counts.success)}</td><td>${number(counts.fail)}</td><td>${rate}</td><td>${number(counts.input_tokens)}</td><td>${number(counts.output_tokens)}</td><td class="token-value">${number(counts.tokens)}</td><td>${average}</td></tr>`;
+      }
+      const rows = [row("全部调用", state.daily.global)];
+      for (const [id, label] of Object.entries(state.authorizationLabels)) {
+        rows.push(row(label, state.daily.environments?.[id]));
+        for (const [projectId, project] of Object.entries(state.projectLabels)) {
+          if (project.environment_id === id) {
+            rows.push(row(`↳ ${project.name}`, state.daily.projects?.[projectId], true));
+          }
+        }
+      }
+      nodes.dailyStats.innerHTML = `<table class="model-table daily-table"><thead><tr><th>环境 / 项目</th><th>调用次数</th><th>成功</th><th>失败</th><th>成功率</th><th>输入 Tokens</th><th>输出 Tokens</th><th>总 Tokens</th><th>平均响应时长</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
     }
 
     function renderEventDetails(details) {
@@ -818,7 +1031,8 @@
             { label: "Remote", value: close.remote || open?.remote || "-" },
             { label: "Authorization", value: close.authorization || open?.authorization || "未配置" },
             { label: "Status", value: close.status },
-            { label: "Cost", value: `${close.cost_ms}ms` }
+            { label: "请求耗时", value: `${close.cost_ms}ms` },
+            { label: "上游耗时", value: close.upstream_ms == null ? "-" : `${close.upstream_ms}ms` }
           ].concat(hasError ? [
             { label: "Stage", value: close.stage || "-" },
             { label: "Upstream", value: close.upstream_path || "-" }
@@ -859,6 +1073,10 @@
     }
 
     function renderAuthorizationMappings() {
+      const selectedEnvironment = nodes.projectEnvironmentInput.value;
+      nodes.projectEnvironmentInput.innerHTML = '<option value="">选择所属环境</option>' + state.authorizationMappings.map((mapping) =>
+        `<option value="${escapeHtml(mapping.authorization)}">${escapeHtml(mapping.description)}</option>`).join("");
+      nodes.projectEnvironmentInput.value = selectedEnvironment || "";
       if (!state.authorizationMappings.length) {
         nodes.keyMappingList.innerHTML = '<div class="empty">尚未配置 Authorization 映射。</div>';
         return;
@@ -868,9 +1086,39 @@
         <div class="key-mapping-item">
           <div class="mono">${escapeHtml(mapping.authorization)}</div>
           <div>${escapeHtml(mapping.description)}</div>
-          <button class="key-button delete" type="button" data-delete-authorization="${escapeHtml(mapping.authorization)}">删除</button>
+          <div><button class="key-button" type="button" data-edit-authorization="${escapeHtml(mapping.authorization)}">编辑</button>
+          <button class="key-button delete" type="button" data-delete-authorization="${escapeHtml(mapping.authorization)}">删除</button></div>
         </div>
       `).join("");
+    }
+
+    function renderProjectMappings() {
+      const labels = Object.fromEntries(state.authorizationMappings.map((item) => [item.authorization, item.description]));
+      nodes.projectMappingList.innerHTML = state.projectMappings.length ? state.projectMappings.map((project) => `
+        <div class="key-mapping-item">
+          <div class="mono">${escapeHtml(project.authorization)}</div>
+          <div>${escapeHtml(labels[project.environment_authorization] || "环境已删除")} / ${escapeHtml(project.name)}</div>
+          <div><button class="key-button" type="button" data-edit-project="${escapeHtml(project.authorization)}">编辑</button>
+          <button class="key-button delete" type="button" data-delete-project="${escapeHtml(project.authorization)}">删除</button></div>
+        </div>`).join("") : '<div class="empty">尚未配置项目密钥。</div>';
+    }
+
+    async function loadProjectMappings() {
+      const response = await fetch("/project-mappings");
+      if (!response.ok) throw new Error("无法读取项目配置");
+      state.projectMappings = (await response.json()).mappings || [];
+      renderProjectMappings();
+    }
+
+    async function changeProjectMapping(method, payload) {
+      const response = await fetch("/project-mappings", {
+        method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "项目保存失败");
+      state.projectMappings = result.mappings || [];
+      renderProjectMappings();
+      loadStatsSnapshot();
     }
 
     async function loadAuthorizationMappings() {
@@ -881,6 +1129,7 @@
       const payload = await response.json();
       state.authorizationMappings = payload.mappings || [];
       renderAuthorizationMappings();
+      renderProjectMappings();
     }
 
     async function saveAuthorizationMapping(authorization, description) {
@@ -895,6 +1144,7 @@
       }
       state.authorizationMappings = payload.mappings || [];
       renderAuthorizationMappings();
+      loadStatsSnapshot();
     }
 
     async function deleteAuthorizationMapping(authorization) {
@@ -909,13 +1159,70 @@
       }
       state.authorizationMappings = payload.mappings || [];
       renderAuthorizationMappings();
+      loadStatsSnapshot();
     }
 
     function renderAll() {
       renderStats();
+      renderDailyStats();
       renderConnections();
       renderStatsEvents();
       renderAuthorizationMappings();
+      renderProjectMappings();
+    }
+
+    function applyStats(payload) {
+      state.stats.successCount = payload.success_count ?? 0;
+      state.stats.failCount = payload.fail_count ?? 0;
+      state.stats.totalTokens = payload.total_tokens ?? 0;
+      state.stats.byAuthorization = payload.by_authorization || {};
+      state.stats.month = payload.month || state.stats.month;
+      state.stats.ts = payload.ts;
+      state.statsLoaded = true;
+      state.statsError = null;
+    }
+
+    async function loadStatsSnapshot(dailyOnly = false) {
+      const revision = state.statsRevision;
+      const selectedDate = nodes.dailyDate.value || "";
+      const requestId = ++state.snapshotRequestId;
+      try {
+        const response = await fetch(selectedDate ? `/stats?date=${encodeURIComponent(selectedDate)}` : "/stats", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        if (requestId !== state.snapshotRequestId || (nodes.dailyDate.value || "") !== selectedDate) return;
+        state.authorizationLabels = payload.authorizations || {};
+        state.projectLabels = payload.projects || {};
+        state.daily = payload.daily || null;
+        state.dailyError = null;
+        if (!selectedDate && payload.daily?.date) nodes.dailyDate.value = payload.daily.date;
+        if (!dailyOnly && state.statsRevision === revision) {
+          applyStats(payload);
+        }
+      } catch (error) {
+        if (requestId !== state.snapshotRequestId) return;
+        state.dailyError = `读取每日统计失败：${error.message || "未知错误"}`;
+        if (!state.statsLoaded) {
+          state.statsError = `读取统计失败：${error.message || "未知错误"}`;
+        }
+      }
+      renderStats();
+      renderDailyStats();
+    }
+
+    function scheduleDailyRefresh() {
+      state.dailyRefreshNeeded = true;
+      if (state.dailyRefreshTimer !== null) return;
+      state.dailyRefreshTimer = setTimeout(async () => {
+        state.dailyRefreshNeeded = false;
+        try { await loadStatsSnapshot(true); }
+        finally {
+          state.dailyRefreshTimer = null;
+          if (state.dailyRefreshNeeded) scheduleDailyRefresh();
+        }
+      }, 1000);
     }
 
     function handleEvent(payload) {
@@ -937,9 +1244,9 @@
       }
 
       if (payload.type === "stats_update") {
-        state.stats.successCount = payload.success_count ?? 0;
-        state.stats.failCount = payload.fail_count ?? 0;
-        state.stats.totalTokens = payload.total_tokens ?? 0;
+        state.statsRevision += 1;
+        applyStats(payload);
+        scheduleDailyRefresh();
         pushStatsEvent({
           title: "统计更新",
           ts: payload.ts,
@@ -954,6 +1261,12 @@
 
       if (payload.type === "authorization_mappings_update") {
         state.authorizationMappings = payload.mappings || [];
+        loadStatsSnapshot();
+      }
+
+      if (payload.type === "project_mappings_update") {
+        state.projectMappings = payload.mappings || [];
+        loadStatsSnapshot();
       }
 
       renderAll();
@@ -1019,11 +1332,58 @@
         alert(error.message || "保存失败");
       }
     });
+    nodes.dailyDate.addEventListener("change", () => {
+      state.daily = null;
+      state.dailyError = null;
+      renderDailyStats();
+      loadStatsSnapshot(true);
+    });
+    nodes.dailyTarget.addEventListener("change", renderDailyStats);
+    nodes.projectForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        await changeProjectMapping("POST", {
+          authorization: nodes.projectAuthorizationInput.value.trim(),
+          name: nodes.projectNameInput.value.trim(),
+          environment_authorization: nodes.projectEnvironmentInput.value
+        });
+        nodes.projectForm.reset();
+      } catch (error) { alert(error.message || "项目保存失败"); }
+    });
+    nodes.generateProjectAuthorizationButton.addEventListener("click", () => {
+      nodes.projectAuthorizationInput.value = generateAuthorization();
+      nodes.projectAuthorizationInput.focus();
+    });
+    nodes.projectMappingList.addEventListener("click", async (event) => {
+      const edit = event.target.closest("button[data-edit-project]");
+      if (edit) {
+        const project = state.projectMappings.find((item) => item.authorization === edit.dataset.editProject);
+        if (project) {
+          nodes.projectAuthorizationInput.value = project.authorization;
+          nodes.projectNameInput.value = project.name;
+          nodes.projectEnvironmentInput.value = project.environment_authorization;
+        }
+        return;
+      }
+      const button = event.target.closest("button[data-delete-project]");
+      if (!button || !confirm("确定删除这个项目密钥吗？")) return;
+      try { await changeProjectMapping("DELETE", { authorization: button.dataset.deleteProject }); }
+      catch (error) { alert(error.message || "删除失败"); }
+    });
     nodes.generateAuthorizationButton.addEventListener("click", () => {
       nodes.authorizationInput.value = generateAuthorization();
       nodes.authorizationInput.focus();
     });
     nodes.keyMappingList.addEventListener("click", async (event) => {
+      const edit = event.target.closest("button[data-edit-authorization]");
+      if (edit) {
+        const mapping = state.authorizationMappings.find((item) => item.authorization === edit.dataset.editAuthorization);
+        if (mapping) {
+          nodes.authorizationInput.value = mapping.authorization;
+          nodes.descriptionInput.value = mapping.description;
+        }
+        return;
+      }
       const button = event.target.closest("button[data-delete-authorization]");
       if (!button || !confirm("确定删除这个 Authorization 映射吗？")) {
         return;
@@ -1037,7 +1397,11 @@
     loadAuthorizationMappings().catch((error) => {
       nodes.keyMappingList.innerHTML = `<div class="empty">${escapeHtml(error.message || "无法读取密钥映射")}</div>`;
     });
+    loadProjectMappings().catch((error) => {
+      nodes.projectMappingList.textContent = error.message;
+    });
     startEventStream();
+    loadStatsSnapshot();
   </script>
 </body>
 </html>
