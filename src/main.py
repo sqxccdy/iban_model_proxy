@@ -12,8 +12,8 @@ import aiohttp
 import yaml
 from redis.asyncio import Redis
 from aiohttp import web, ClientSession, ClientTimeout
-from stats import StatsRecorder, get_stats_snapshot, extract_usage, usage_counts
-from key_registry import (
+from .stats import StatsRecorder, get_stats_snapshot, extract_usage, usage_counts
+from .key_registry import (
     AUTHORIZATION_MAPPING_KEY, PROJECT_MAPPING_KEY, normalize_authorization,
     authorization_stats_id, get_authorization_mappings, get_project_mappings,
     get_authorization_context, mutate_registry,
