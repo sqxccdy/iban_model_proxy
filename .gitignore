@@ -3,4 +3,4 @@ volumes
 *.pyc
 model.yaml
 .idea/
-README.md
+docs/
