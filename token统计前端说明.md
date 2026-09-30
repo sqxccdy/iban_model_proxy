@@ -16,6 +16,8 @@
 
 当前 `docker-compose.yml` 的代理服务引用远端旧版 `model_proxy:v1.0.1` 镜像，它不会自动包含这个目录里的新功能。要查看当前修改，应运行本地源码或另行构建并部署当前源码镜像。
 
+内置监控页显示整体月度调用汇总与原有本月环境表，下面保留每日环境→项目两级表，并新增一张使用相同六项指标和表格列的每日模型表。模型表可选择全部调用、环境或项目；选环境时读取 `daily.environment_models[envId]`，选项目时读取 `daily.project_models[projectId]`。
+
 ## 二、给新前端的接口与字段
 
 以下路径以代理服务地址为基准。本地直接运行通常是 `http://localhost:8080`，Gunicorn 方式通常是 `http://localhost:8000`。当前后端没有额外配置跨域响应头；新页面最好与代理服务同源，或由前端服务器反向代理这些路径。所有管理接口目前也没有独立的管理员鉴权，且会返回原始密钥，部署时需要限制谁能访问。
@@ -33,6 +35,23 @@
   "total_tokens": 24,
   "by_authorization": {
     "envId": {"success": 3, "fail": 0, "tokens": 24}
+  },
+  "by_model": {
+    "gpt-4o": {"success": 3, "fail": 1, "tokens": 24}
+  },
+  "by_environment_model": {
+    "envId": {
+      "gpt-4o": {"success": 3, "fail": 0, "tokens": 24,
+        "input_tokens": 16, "output_tokens": 8, "duration_ms": 900,
+        "calls": 3, "success_rate": 100.0, "avg_duration_ms": 300.0}
+    }
+  },
+  "by_project_model": {
+    "projectId": {
+      "gpt-4o": {"success": 2, "fail": 0, "tokens": 17,
+        "input_tokens": 11, "output_tokens": 6, "duration_ms": 600,
+        "calls": 2, "success_rate": 100.0, "avg_duration_ms": 300.0}
+    }
   },
   "authorizations": {"envId": "测试环境"},
   "projects": {
@@ -59,6 +78,31 @@
         "input_tokens": 11, "output_tokens": 6, "duration_ms": 600,
         "calls": 2, "success_rate": 100.0, "avg_duration_ms": 300.0
       }
+    },
+    "models": {
+      "gpt-4o": {
+        "success": 3, "fail": 1, "tokens": 24,
+        "input_tokens": 16, "output_tokens": 8, "duration_ms": 1000,
+        "calls": 4, "success_rate": 75.0, "avg_duration_ms": 250.0
+      }
+    },
+    "environment_models": {
+      "envId": {
+        "gpt-4o": {
+          "success": 3, "fail": 0, "tokens": 24,
+          "input_tokens": 16, "output_tokens": 8, "duration_ms": 900,
+          "calls": 3, "success_rate": 100.0, "avg_duration_ms": 300.0
+        }
+      }
+    },
+    "project_models": {
+      "projectId": {
+        "gpt-4o": {
+          "success": 2, "fail": 0, "tokens": 17,
+          "input_tokens": 11, "output_tokens": 6, "duration_ms": 600,
+          "calls": 2, "success_rate": 100.0, "avg_duration_ms": 300.0
+        }
+      }
     }
   },
   "ts": 1790000000000
@@ -72,14 +116,20 @@
 | `month`                                       | 字符串，当前月度累计所属月份 `YYYY-MM`；即使查询过去日期，月度字段仍是当前月份。 |
 | `success_count`、`fail_count`、`total_tokens` | 整数，全局本月累计。                                         |
 | `by_authorization[envId]`                     | 当前已配置环境的本月 `success`、`fail`、`tokens`；键是环境密钥标识。 |
+| `by_model[model]`                              | 按客户端请求模型名统计的本月 `success`、`fail`、`tokens`；已配置但未调用的模型也返回 0。 |
+| `by_project_model[projectId][model]`           | 当前已配置项目中各模型的本月指标，包含输入、输出与总 Token。 |
+| `by_environment_model[envId][model]`           | 当前已配置环境中各模型的本月指标，包含所属项目调用。 |
 | `authorizations[envId]`                       | 环境密钥标识到环境名称的映射，用于显示和选项。               |
 | `projects[projectId]`                         | 项目密钥标识到 `{name, environment_id}` 的映射；`environment_id` 对应 `authorizations` 的键。 |
 | `daily.date`、`daily.timezone`                | 每日数据的日期和时区。                                       |
 | `daily.global`                                | 所选日期所有调用的指标，包括未登记密钥。                     |
 | `daily.environments[envId]`                   | 所选日期该环境直接调用与其项目调用的合计。                   |
 | `daily.projects[projectId]`                   | 所选日期该项目密钥的调用。                                   |
+| `daily.models[model]`                          | 所选日期该模型的调用，包含所有密钥。模型名使用请求值，而非 `upstream_model`。 |
+| `daily.project_models[projectId][model]`       | 所选日期该项目调用该模型的指标。 |
+| `daily.environment_models[envId][model]`       | 所选日期该环境直接调用及其项目调用该模型的合计。 |
 
-`daily.global`、每个 `daily.environments[envId]` 和每个 `daily.projects[projectId]` 的指标对象结构相同：
+`daily.global`、每个 `daily.environments[envId]`、`daily.projects[projectId]`、`daily.models[model]`、`daily.environment_models[envId][model]`、`daily.project_models[projectId][model]` 及对应的月度交叉指标对象结构相同：
 
 | 字段              | 类型与展示建议                                               |
 | ----------------- | ------------------------------------------------------------ |
@@ -92,7 +142,7 @@
 | `success`、`fail` | 整数，成功和失败次数，可用于明细表。                         |
 | `duration_ms`     | 整数，所有调用的耗时总和，单位毫秒；一般不直接当平均时长展示。 |
 
-只返回当前仍配置的环境和项目维度；没有请求的已配置密钥也会有值为 0 的指标对象。删除配置后，历史统计仍在 Redis，但该密钥不会出现在 `/stats` 的环境或项目明细中。全局值不能通过把环境行相加获得，因为可能有未配置密钥；环境行已经包含其项目调用，也不能与项目行重复相加。后台统计写入是异步的，刚完成的调用可能要稍后才出现在查询结果中。
+环境、项目及其模型明细只返回当前仍配置的环境或项目；没有请求的已配置对象也会有值为 0 的指标对象。删除配置后，历史统计仍在 Redis，但不会出现在对应环境或项目的模型明细中。全局值不能通过把环境行相加获得，因为可能有未配置密钥；环境行已经包含其项目调用，也不能与项目行重复相加。后台统计写入是异步的，刚完成的调用可能要稍后才出现在查询结果中。旧数据无法补出环境、项目与模型的交叉明细。
 
 ### 2. 环境密钥管理：`/authorization-mappings`
 
@@ -122,7 +172,7 @@
 
 | `type`                          | 主要字段                                                     | 前端用途                                                     |
 | ------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| `stats_update`                  | `month`、`success_count`、`fail_count`、`total_tokens`、`by_authorization`、`ts` | 更新本月累计；**不含 `daily`、名称映射**，收到后重新请求 `/stats?date=...` 才能刷新每日六项指标。 |
+| `stats_update`                  | `month`、`success_count`、`fail_count`、`total_tokens`、`by_authorization`、`by_model`、`by_environment_model`、`by_project_model`、`ts` | 更新本月累计；**不含 `daily`、名称映射**，收到后重新请求 `/stats?date=...` 才能刷新每日六项指标。 |
 | `authorization_mappings_update` | `mappings`、`ts`                                             | 环境配置变化，更新密钥管理列表并重新请求 `/stats`。          |
 | `project_mappings_update`       | `mappings`、`ts`                                             | 项目配置变化，更新密钥管理列表并重新请求 `/stats`。          |
 | `conn_open`                     | `conn_id`、`remote`、`path`、`authorization`、`request_info`、`ts` | 连接开始；`authorization` 是环境或项目的显示名称，未匹配时是“未配置”。 |

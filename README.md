@@ -248,13 +248,13 @@ Content-Type: text/event-stream
 打开内置静态监控页面。页面首次加载会从 `/stats` 读取本月累计值，随后订阅 `/events` 实时更新，并显示：
 
 - 代理错误数
-- 成功次数、失败次数、累计 token 数
-- 本月各已配置 Authorization 密钥的成功、失败和 token 数（以环境描述显示）
+- 本月成功次数、失败次数、调用次数和累计 Token 数
+- 本月环境密钥用量表，以及每日环境与项目、每日模型两张明细表
 - 最近 50 条事件
 
-密钥统计表格位于首页总数卡片下方，已配置密钥即使尚无请求也会显示 0。先在页面的密钥管理中保存 Authorization 和环境描述，再用相同的 `Authorization: Bearer <密钥>` 发起代理请求。未配置的密钥不显示在明细中，但其请求仍计入总数。
+在页面的密钥管理中保存 Authorization 和环境描述后，可用相同的 `Authorization: Bearer <密钥>` 发起代理请求。未配置的密钥不显示在项目明细中，但其请求仍计入月度总数和全部模型调用。
 
-“每日环境与项目用量”可选择日期与密钥，显示六项指标：Token 总用量、输入 Token、输出 Token、调用次数、调用成功率、平均响应时长。环境行包含其项目调用；项目行是该环境的明细，不要把环境和项目行再相加。创建项目时填写项目名称、独立的 Authorization 密钥，并选择所属环境；项目密钥调用会同时计入项目与环境。日期按北京时间、调用完成时间归档。
+“每日环境与项目用量”保留环境、项目两级明细；选择环境或项目可查看该范围的六项指标。“每日模型用量”使用相同指标和表格列，可选择全部调用、某个环境或某个项目，查看范围内各模型的调用。两个日期输入同步，日期按北京时间、调用完成时间归档。
 
 输入/输出 Token 从上游返回的 `usage.prompt_tokens` / `usage.completion_tokens`，或 `usage.input_tokens` / `usage.output_tokens` 提取；总用量优先取 `usage.total_tokens`，缺少时才合计输入与输出。上游未返回某项 usage 时，该项记录为 0。调用次数为成功加失败；成功率为成功次数除以调用次数；平均响应时长为完成调用的耗时总和除以调用次数，流式调用包含整段流完成时间。旧月度统计无法还原这些新增的历史每日字段。
 
@@ -262,7 +262,7 @@ Content-Type: text/event-stream
 
 ### `GET /stats`
 
-返回当前月份的成功数、失败数、token 总数，以及 `by_authorization` 明细和 `authorizations` 环境描述映射。可用 `?date=YYYY-MM-DD` 读取指定日期；`daily.global`、`daily.environments`、`daily.projects` 包含六项指标所需的计数与派生字段，`daily.timezone` 为 `Asia/Shanghai`。明细字段使用密钥的 SHA-256 标识，不返回原始密钥。这个接口只读取 Redis，不会为了测试而增加计数。
+返回当前月份的成功数、失败数、Token 总数及各维度明细。可用 `?date=YYYY-MM-DD` 读取指定日期；`daily.global`、`daily.environments`、`daily.projects`、`daily.models`、`daily.environment_models` 和 `daily.project_models` 包含每日六项指标所需的计数与派生字段，`daily.timezone` 为 `Asia/Shanghai`。项目和环境字段使用密钥的 SHA-256 标识，不返回原始密钥。这个接口只读取 Redis，不会为了测试而增加计数。
 
 ### `GET/POST/DELETE /project-mappings`
 
@@ -282,13 +282,16 @@ Content-Type: text/event-stream
 - `llm:stats:tokens`
 - `llm:stats:month`：当前统计所属月份，格式 `YYYY-MM`，跨月时会自动清空统计
 - `llm:stats:dimension:authorization:success` / `fail` / `tokens`：Redis Hash，字段为已配置密钥的 SHA-256 标识
-- `llm:stats:daily:YYYY-MM-DD:{success,fail,tokens,input_tokens,output_tokens,duration_ms}`：每日 Redis Hash，字段包含 `global`、`authorization:<密钥标识>` 和 `project:<密钥标识>`
+- `llm:stats:dimension:model:{success,fail,tokens}`：Redis Hash，字段为客户端请求的模型名
+- `llm:stats:dimension:project_model:{success,fail,tokens,input_tokens,output_tokens,duration_ms}`：Redis Hash，字段为项目密钥标识与模型名的组合
+- `llm:stats:dimension:environment_model:{success,fail,tokens,input_tokens,output_tokens,duration_ms}`：Redis Hash，字段为环境密钥标识与模型名的组合
+- `llm:stats:daily:YYYY-MM-DD:{success,fail,tokens,input_tokens,output_tokens,duration_ms}`：每日 Redis Hash，字段包含 `global`、`authorization:<密钥标识>`、`project:<密钥标识>`、`model:<模型名>`、`environment_model:<环境标识>:<模型名>` 和 `project_model:<项目标识>:<模型名>`
 - `monitor:project:mappings`、`monitor:project:owners`：项目配置及其环境归属
 - `llm:stats:dimension:keys`：当前月份使用过的维度统计键集合，跨月时清空
 - `llm:stats:batch_ids`：本月已写入的批次标识，用于避免 Redis 重试时重复计数
 
-统计在请求协程中只做内存聚合，由后台任务批量写入 Redis 并发布 `stats_update`。
-事件保留原有总数字段，并增加 `by_authorization` 映射。以后增加统计维度时，可向统计记录器传入新的维度名和值；维度名会自动映射到对应的 Redis Hash。
+统计在请求协程中只做内存聚合，由后台任务批量写入 Redis 并发布 `stats_update`。`/stats` 提供 `by_model`、`by_environment_model`、`by_project_model` 本月汇总以及对应每日指标。监控页保留整体月度汇总、本月环境表和每日环境→项目表，另加每日模型表；后者可按环境或项目查看各模型的输入、输出和总 Token。环境模型用量包含其项目调用。模型统计按请求中的模型名归类，MinerU 按配置的模型名归类；路由失败且无法识别模型的请求只计入全局。旧数据无法补出环境、项目与模型的交叉明细。
+事件保留原有总数字段，并包含 `by_authorization`、`by_model`、`by_environment_model` 和 `by_project_model` 映射。以后增加统计维度时，可向统计记录器传入新的维度名和值；维度名会自动映射到对应的 Redis Hash。
 Redis 暂时不可用时后台任务会重试；服务退出时最多等待 5 秒完成写入。如果上游没有提供 token usage，就只能记录该次请求的成功或失败，无法准确推算 token。
 
 ## 本地运行

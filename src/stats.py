@@ -88,6 +88,14 @@ for _, item in ipairs(batch) do
             for dimension, value in pairs(item.dimensions) do
                 redis.call('HINCRBY', daily_key, dimension .. ':' .. value, count)
             end
+            if item.dimensions.authorization and item.dimensions.model then
+                redis.call('HINCRBY', daily_key,
+                    'environment_model:' .. item.dimensions.authorization .. ':' .. item.dimensions.model, count)
+            end
+            if item.dimensions.project and item.dimensions.model then
+                redis.call('HINCRBY', daily_key,
+                    'project_model:' .. item.dimensions.project .. ':' .. item.dimensions.model, count)
+            end
         end
     end
     for dimension, value in pairs(item.dimensions) do
@@ -96,6 +104,26 @@ for _, item in ipairs(batch) do
                 local key = 'llm:stats:dimension:' .. dimension .. ':' .. metric
                 redis.call('SADD', KEYS[5], key)
                 redis.call('HINCRBY', key, value, count)
+            end
+        end
+    end
+    if in_month and item.dimensions.authorization and item.dimensions.model then
+        for metric, count in pairs(metrics) do
+            if count > 0 then
+                local key = 'llm:stats:dimension:environment_model:' .. metric
+                redis.call('SADD', KEYS[5], key)
+                redis.call('HINCRBY', key,
+                    item.dimensions.authorization .. ':' .. item.dimensions.model, count)
+            end
+        end
+    end
+    if in_month and item.dimensions.project and item.dimensions.model then
+        for metric, count in pairs(metrics) do
+            if count > 0 then
+                local key = 'llm:stats:dimension:project_model:' .. metric
+                redis.call('SADD', KEYS[5], key)
+                redis.call('HINCRBY', key,
+                    item.dimensions.project .. ':' .. item.dimensions.model, count)
             end
         end
     end
@@ -114,8 +142,50 @@ for _, metric in ipairs({'success', 'fail', 'tokens'}) do
         by_authorization[authorization][metric] = tonumber(rows[i + 1])
     end
 end
+local by_model = {}
+for _, metric in ipairs({'success', 'fail', 'tokens'}) do
+    local rows = redis.call('HGETALL', 'llm:stats:dimension:model:' .. metric)
+    for i = 1, #rows, 2 do
+        local model = rows[i]
+        if not by_model[model] then by_model[model] = {success=0, fail=0, tokens=0} end
+        by_model[model][metric] = tonumber(rows[i + 1])
+    end
+end
+local by_project_model = {}
+for _, metric in ipairs({'success', 'fail', 'tokens', 'input_tokens', 'output_tokens', 'duration_ms'}) do
+    local rows = redis.call('HGETALL', 'llm:stats:dimension:project_model:' .. metric)
+    for i = 1, #rows, 2 do
+        local project, model = string.match(rows[i], '^([^:]+):(.+)$')
+        if project and model then
+            if not by_project_model[project] then by_project_model[project] = {} end
+            if not by_project_model[project][model] then
+                by_project_model[project][model] = {success=0, fail=0, tokens=0,
+                    input_tokens=0, output_tokens=0, duration_ms=0}
+            end
+            by_project_model[project][model][metric] = tonumber(rows[i + 1])
+        end
+    end
+end
+local by_environment_model = {}
+for _, metric in ipairs({'success', 'fail', 'tokens', 'input_tokens', 'output_tokens', 'duration_ms'}) do
+    local rows = redis.call('HGETALL', 'llm:stats:dimension:environment_model:' .. metric)
+    for i = 1, #rows, 2 do
+        local environment, model = string.match(rows[i], '^([^:]+):(.+)$')
+        if environment and model then
+            if not by_environment_model[environment] then by_environment_model[environment] = {} end
+            if not by_environment_model[environment][model] then
+                by_environment_model[environment][model] = {success=0, fail=0, tokens=0,
+                    input_tokens=0, output_tokens=0, duration_ms=0}
+            end
+            by_environment_model[environment][model][metric] = tonumber(rows[i + 1])
+        end
+    end
+end
 totals.type = 'stats_update'
 totals.by_authorization = by_authorization
+totals.by_model = by_model
+totals.by_project_model = by_project_model
+totals.by_environment_model = by_environment_model
 totals.month = month
 totals.ts = tonumber(ARGV[3])
 redis.call('PUBLISH', KEYS[7], cjson.encode(totals))
@@ -123,7 +193,7 @@ return 1
 """
 
 
-async def get_stats_snapshot(redis, keys, authorization_labels=None, project_labels=None, day=None):
+async def get_stats_snapshot(redis, keys, authorization_labels=None, project_labels=None, day=None, model_names=None):
     """Read a consistent monthly snapshot for a newly opened monitor page."""
     day = day or current_stats_day()
     month = current_stats_day()[:7]
@@ -132,13 +202,46 @@ async def get_stats_snapshot(redis, keys, authorization_labels=None, project_lab
         pipe.mget(*keys[1:4])
         for metric in ("success", "fail", "tokens"):
             pipe.hgetall(f"llm:stats:dimension:authorization:{metric}")
+        for metric in ("success", "fail", "tokens"):
+            pipe.hgetall(f"llm:stats:dimension:model:{metric}")
+        for metric in METRICS:
+            pipe.hgetall(f"llm:stats:dimension:project_model:{metric}")
+        for metric in METRICS:
+            pipe.hgetall(f"llm:stats:dimension:environment_model:{metric}")
         for metric in METRICS:
             pipe.hgetall(f"llm:stats:daily:{day}:{metric}")
-        stored_month, totals, successes, failures, tokens, *daily_rows = await pipe.execute()
+        results = await pipe.execute()
+        stored_month, totals, successes, failures, tokens, model_successes, model_failures, model_tokens = results[:8]
+        project_model_rows = results[8:8 + len(METRICS)]
+        environment_model_rows = results[8 + len(METRICS):8 + 2 * len(METRICS)]
+        daily_rows = results[8 + 2 * len(METRICS):]
 
     authorization_labels = authorization_labels or {}
     project_labels = project_labels or {}
+    model_names = set(model_names or ())
+    for rows in daily_rows:
+        model_names.update(key[len("model:"):] for key in rows if key.startswith("model:"))
+        for key in rows:
+            for dimension in ("project_model", "environment_model"):
+                if key.startswith(dimension + ":"):
+                    _, _, model = key[len(dimension) + 1:].partition(":")
+                    if model:
+                        model_names.add(model)
+    if stored_month == month:
+        model_names.update(model_successes)
+        model_names.update(model_failures)
+        model_names.update(model_tokens)
+        for rows in [*project_model_rows, *environment_model_rows]:
+            for key in rows:
+                _, _, model = key.partition(":")
+                if model:
+                    model_names.add(model)
     by_authorization = {key: {"success": 0, "fail": 0, "tokens": 0} for key in authorization_labels}
+    by_model = {name: {"success": 0, "fail": 0, "tokens": 0} for name in sorted(model_names)}
+    by_project_model = {project: {name: {metric: 0 for metric in METRICS} for name in sorted(model_names)}
+                        for project in project_labels}
+    by_environment_model = {environment: {name: {metric: 0 for metric in METRICS} for name in sorted(model_names)}
+                            for environment in authorization_labels}
     if stored_month != month:
         totals = (0, 0, 0)
     else:
@@ -146,12 +249,30 @@ async def get_stats_snapshot(redis, keys, authorization_labels=None, project_lab
             for key, count in rows.items():
                 if key in by_authorization:
                     by_authorization[key][metric] = int(count)
+        for metric, rows in (("success", model_successes), ("fail", model_failures), ("tokens", model_tokens)):
+            for name, count in rows.items():
+                by_model[name][metric] = int(count)
+        for metric, rows in zip(METRICS, project_model_rows):
+            for key, count in rows.items():
+                project, _, model = key.partition(":")
+                if project in by_project_model and model in by_project_model[project]:
+                    by_project_model[project][model][metric] = int(count)
+        for metric, rows in zip(METRICS, environment_model_rows):
+            for key, count in rows.items():
+                environment, _, model = key.partition(":")
+                if environment in by_environment_model and model in by_environment_model[environment]:
+                    by_environment_model[environment][model][metric] = int(count)
 
     daily = {
         "date": day,
         "global": {metric: 0 for metric in METRICS},
         "environments": {key: {metric: 0 for metric in METRICS} for key in authorization_labels},
         "projects": {key: {metric: 0 for metric in METRICS} for key in project_labels},
+        "models": {name: {metric: 0 for metric in METRICS} for name in sorted(model_names)},
+        "project_models": {project: {name: {metric: 0 for metric in METRICS} for name in sorted(model_names)}
+                           for project in project_labels},
+        "environment_models": {environment: {name: {metric: 0 for metric in METRICS} for name in sorted(model_names)}
+                               for environment in authorization_labels},
     }
     for metric, rows in zip(METRICS, daily_rows):
         daily["global"][metric] = int(rows.get("global", 0))
@@ -159,7 +280,21 @@ async def get_stats_snapshot(redis, keys, authorization_labels=None, project_lab
             daily["environments"][key][metric] = int(rows.get(f"authorization:{key}", 0))
         for key in project_labels:
             daily["projects"][key][metric] = int(rows.get(f"project:{key}", 0))
-    for counts in [daily["global"], *daily["environments"].values(), *daily["projects"].values()]:
+        for name in model_names:
+            daily["models"][name][metric] = int(rows.get(f"model:{name}", 0))
+        for project in project_labels:
+            for name in model_names:
+                daily["project_models"][project][name][metric] = int(rows.get(f"project_model:{project}:{name}", 0))
+        for environment in authorization_labels:
+            for name in model_names:
+                daily["environment_models"][environment][name][metric] = int(rows.get(f"environment_model:{environment}:{name}", 0))
+    metric_groups = [daily["global"], *daily["environments"].values(),
+                     *daily["projects"].values(), *daily["models"].values()]
+    metric_groups.extend(counts for models in daily["project_models"].values() for counts in models.values())
+    metric_groups.extend(counts for models in daily["environment_models"].values() for counts in models.values())
+    metric_groups.extend(counts for models in by_project_model.values() for counts in models.values())
+    metric_groups.extend(counts for models in by_environment_model.values() for counts in models.values())
+    for counts in metric_groups:
         calls = counts["success"] + counts["fail"]
         counts["calls"] = calls
         counts["success_rate"] = round(100 * counts["success"] / calls, 2) if calls else None
@@ -173,6 +308,9 @@ async def get_stats_snapshot(redis, keys, authorization_labels=None, project_lab
         "fail_count": int(totals[1] or 0),
         "total_tokens": int(totals[2] or 0),
         "by_authorization": by_authorization,
+        "by_model": by_model,
+        "by_project_model": by_project_model,
+        "by_environment_model": by_environment_model,
         "authorizations": authorization_labels,
         "projects": project_labels,
         "daily": daily,

@@ -267,6 +267,8 @@
     }
 
     .daily-controls { display: flex; align-items: center; gap: 10px; }
+    .daily-controls .key-input { width: auto; min-width: 130px; }
+    .daily-controls [hidden] { display: none; }
     .daily-table { min-width: 1050px; }
     .daily-table .project-name { padding-left: 28px; font-weight: 500; }
     .daily-metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
@@ -622,7 +624,7 @@
         <h1>连接监控<br>一眼看清</h1>
         <p class="subtext">
           页面会从 <span class="mono">/stats</span> 读取本月累计，再订阅 <span class="mono">/events</span> 更新连接和统计。
-          下方可直接查看每个已配置密钥的 token、成功和失败次数。
+          下方可按日期查看环境、项目及各模型的 Token、调用次数与响应时长。
         </p>
       </div>
       <div class="hero-card status-card">
@@ -640,9 +642,11 @@
           <div class="status-label">代理错误数</div>
           <div class="big-number" id="errorCount">0</div>
         </div>
+        <div class="muted">最近连接 <span id="connectionCount">0</span></div>
       </div>
     </section>
 
+    <div class="panel-head"><h2>本月总览</h2><div class="panel-copy" id="modelStatsMeta">正在读取统计...</div></div>
     <section class="cards">
       <article class="panel card">
         <div>
@@ -667,34 +671,43 @@
       </article>
       <article class="panel card">
         <div>
-          <h2>最近连接</h2>
-          <div class="card-value" id="connectionCount">0</div>
+          <h2>调用次数</h2>
+          <div class="card-value" id="callCount">0</div>
         </div>
-        <div class="card-footer">页面内保留最近 50 个连接</div>
+        <div class="card-footer">本月成功与失败调用之和</div>
       </article>
     </section>
 
-    <section class="panel model-panel" aria-labelledby="modelStatsTitle">
-      <div class="panel-head">
-        <div>
-          <h2 id="modelStatsTitle">本月密钥用量</h2>
-          <div class="panel-copy">按请求中的 Authorization 统计，以配置的环境描述显示；token 取自上游返回的 usage。</div>
-        </div>
-        <div class="panel-copy" id="modelStatsMeta">正在读取统计...</div>
-      </div>
-      <div class="model-table-scroll" id="modelStats">正在读取统计...</div>
+    <section class="panel model-panel" aria-labelledby="monthlyEnvironmentTitle">
+      <div class="panel-head"><div><h2 id="monthlyEnvironmentTitle">本月密钥用量</h2><div class="panel-copy">按环境密钥统计，包含该环境的项目调用。</div></div></div>
+      <div class="model-table-scroll" id="monthlyEnvironmentStats">正在读取统计...</div>
     </section>
 
     <section class="panel model-panel" aria-labelledby="dailyStatsTitle">
       <div class="panel-head">
         <div>
           <h2 id="dailyStatsTitle">每日环境与项目用量</h2>
-          <div class="panel-copy">按北京时间归档；环境包含其项目用量，项目行是明细。全部调用包含未配置密钥；成功率和平均时长包含成功与失败调用。</div>
+          <div class="panel-copy">环境行包含其项目用量，项目行是明细；选择环境或项目可查看对应指标。</div>
         </div>
-        <div class="daily-controls"><label for="dailyDate">日期</label><input id="dailyDate" class="key-input" type="date"><label for="dailyTarget">密钥</label><select id="dailyTarget" class="key-input"><option value="global">全部调用</option></select></div>
+        <div class="daily-controls">
+          <label for="dailyDate">日期</label><input id="dailyDate" class="key-input" type="date">
+          <label for="dailyTarget">统计对象</label><select id="dailyTarget" class="key-input"><option value="global">全部调用</option></select>
+        </div>
       </div>
       <div id="dailyMetrics" class="daily-metric-grid" aria-live="polite"></div>
       <div class="model-table-scroll" id="dailyStats">正在读取统计...</div>
+    </section>
+
+    <section class="panel model-panel" aria-labelledby="modelDailyTitle">
+      <div class="panel-head">
+        <div><h2 id="modelDailyTitle">每日模型用量</h2><div class="panel-copy">选择全部调用、环境或项目，查看该范围内各模型的用量。</div></div>
+        <div class="daily-controls">
+          <label for="modelDailyDate">日期</label><input id="modelDailyDate" class="key-input" type="date">
+          <label for="modelDailyTarget">统计对象</label><select id="modelDailyTarget" class="key-input"><option value="global">全部调用</option></select>
+        </div>
+      </div>
+      <div id="modelDailyMetrics" class="daily-metric-grid" aria-live="polite"></div>
+      <div class="model-table-scroll" id="modelDailyStats">正在读取统计...</div>
     </section>
 
     <section class="grid">
@@ -782,6 +795,7 @@
       successCount: document.getElementById("successCount"),
       failCount: document.getElementById("failCount"),
       tokenCount: document.getElementById("tokenCount"),
+      callCount: document.getElementById("callCount"),
       connectionCount: document.getElementById("connectionCount"),
       connectionsTab: document.getElementById("connectionsTab"),
       statsTab: document.getElementById("statsTab"),
@@ -792,12 +806,16 @@
       connectionFilterList: document.getElementById("connectionFilterList"),
       connectionList: document.getElementById("connectionList"),
       statsList: document.getElementById("statsList"),
-      modelStats: document.getElementById("modelStats"),
+      monthlyEnvironmentStats: document.getElementById("monthlyEnvironmentStats"),
       modelStatsMeta: document.getElementById("modelStatsMeta"),
       dailyDate: document.getElementById("dailyDate"),
       dailyTarget: document.getElementById("dailyTarget"),
       dailyMetrics: document.getElementById("dailyMetrics"),
       dailyStats: document.getElementById("dailyStats"),
+      modelDailyDate: document.getElementById("modelDailyDate"),
+      modelDailyTarget: document.getElementById("modelDailyTarget"),
+      modelDailyMetrics: document.getElementById("modelDailyMetrics"),
+      modelDailyStats: document.getElementById("modelDailyStats"),
       keyForm: document.getElementById("keyForm"),
       authorizationInput: document.getElementById("authorizationInput"),
       generateAuthorizationButton: document.getElementById("generateAuthorizationButton"),
@@ -880,40 +898,11 @@
       nodes.lastEventTime.textContent = ts ? "最近事件 " + formatTime(ts) : "尚未收到事件";
     }
 
-    function renderStats() {
-      nodes.errorCount.textContent = String(state.errorCount);
-      nodes.successCount.textContent = Number(state.stats.successCount).toLocaleString("zh-CN");
-      nodes.failCount.textContent = Number(state.stats.failCount).toLocaleString("zh-CN");
-      nodes.tokenCount.textContent = Number(state.stats.totalTokens).toLocaleString("zh-CN");
-
-      const authorizationIds = Object.keys(state.authorizationLabels);
-      authorizationIds.sort((a, b) => {
-        const tokenDifference = (state.stats.byAuthorization[b]?.tokens || 0) - (state.stats.byAuthorization[a]?.tokens || 0);
-        return tokenDifference || state.authorizationLabels[a].localeCompare(state.authorizationLabels[b], "zh-CN");
-      });
-      nodes.modelStatsMeta.textContent = state.statsLoaded
-        ? `${state.stats.month || "本月"} · 更新于 ${formatTime(state.stats.ts)}`
-        : (state.statsError || "正在读取统计...");
-      if (!state.statsLoaded) {
-        nodes.modelStats.textContent = state.statsError || "正在读取统计...";
-        return;
-      }
-      if (!authorizationIds.length) {
-        nodes.modelStats.textContent = "尚未配置密钥";
-        return;
-      }
-      nodes.modelStats.innerHTML = `
-        <table class="model-table">
-          <thead><tr><th scope="col">环境描述</th><th scope="col">成功</th><th scope="col">失败</th><th scope="col">累计 Tokens</th></tr></thead>
-          <tbody>${authorizationIds.map((id) => {
-            const counts = state.stats.byAuthorization[id] || {};
-            return `<tr><td class="model-name">${escapeHtml(state.authorizationLabels[id])}</td><td>${Number(counts.success || 0).toLocaleString("zh-CN")}</td><td>${Number(counts.fail || 0).toLocaleString("zh-CN")}</td><td class="token-value">${Number(counts.tokens || 0).toLocaleString("zh-CN")}</td></tr>`;
-          }).join("")}</tbody>
-        </table>`;
+    function number(value) {
+      return Number(value || 0).toLocaleString("zh-CN");
     }
 
-    function renderDailyStats() {
-      const selectedTarget = nodes.dailyTarget.value || "global";
+    function scopeOptions() {
       const options = ['<option value="global">全部调用</option>'];
       for (const [id, label] of Object.entries(state.authorizationLabels)) {
         options.push(`<option value="environment:${escapeHtml(id)}">环境 · ${escapeHtml(label)}</option>`);
@@ -923,47 +912,117 @@
           }
         }
       }
-      nodes.dailyTarget.innerHTML = options.join("");
-      nodes.dailyTarget.value = selectedTarget;
-      if (!nodes.dailyTarget.value) nodes.dailyTarget.value = "global";
+      return options.join("");
+    }
+
+    function refreshScopeSelect(node, options) {
+      const selected = node.value || "global";
+      node.innerHTML = options;
+      node.value = selected;
+      if (!node.value) node.value = "global";
+    }
+
+    function selectedScope(node) {
+      const value = node.value || "global";
+      const separator = value.indexOf(":");
+      return separator < 0 ? ["global", ""] : [value.slice(0, separator), value.slice(separator + 1)];
+    }
+
+    function renderMetricCards(node, counts = {}) {
+      const calls = Number(counts.success || 0) + Number(counts.fail || 0);
+      const metrics = [
+        ["Token 总用量", number(counts.tokens)],
+        ["输入 Token", number(counts.input_tokens)],
+        ["输出 Token", number(counts.output_tokens)],
+        ["调用次数", number(calls)],
+        ["调用成功率", calls ? `${(100 * Number(counts.success || 0) / calls).toFixed(2)}%` : "—"],
+        ["平均响应时长", calls ? `${(Number(counts.duration_ms || 0) / calls / 1000).toFixed(2)} 秒` : "—"]
+      ];
+      node.innerHTML = metrics.map(([label, value]) =>
+        `<div class="daily-metric"><div class="daily-metric-label">${label}</div><div class="daily-metric-value">${value}</div></div>`).join("");
+    }
+
+    function renderUsageTable(node, heading, rows, emptyText) {
+      if (!rows.length) {
+        node.textContent = emptyText;
+        return;
+      }
+      const body = rows.map(({label, counts = {}, isProject = false}) => {
+        const calls = Number(counts.success || 0) + Number(counts.fail || 0);
+        const rate = calls ? `${(100 * Number(counts.success || 0) / calls).toFixed(1)}%` : "—";
+        const average = calls ? `${(Number(counts.duration_ms || 0) / calls).toFixed(1)} ms` : "—";
+        return `<tr><td class="${isProject ? "project-name" : "model-name"}">${escapeHtml(label)}</td><td>${number(calls)}</td><td>${number(counts.success)}</td><td>${number(counts.fail)}</td><td>${rate}</td><td>${number(counts.input_tokens)}</td><td>${number(counts.output_tokens)}</td><td class="token-value">${number(counts.tokens)}</td><td>${average}</td></tr>`;
+      });
+      node.innerHTML = `<table class="model-table daily-table"><thead><tr><th>${heading}</th><th>调用次数</th><th>成功</th><th>失败</th><th>成功率</th><th>输入 Tokens</th><th>输出 Tokens</th><th>总 Tokens</th><th>平均响应时长</th></tr></thead><tbody>${body.join("")}</tbody></table>`;
+    }
+
+    function renderStats() {
+      nodes.errorCount.textContent = String(state.errorCount);
+      nodes.successCount.textContent = number(state.stats.successCount);
+      nodes.failCount.textContent = number(state.stats.failCount);
+      nodes.tokenCount.textContent = number(state.stats.totalTokens);
+      nodes.callCount.textContent = number(state.stats.successCount + state.stats.failCount);
+      nodes.modelStatsMeta.textContent = state.statsLoaded
+        ? `${state.stats.month || "本月"} · 更新于 ${formatTime(state.stats.ts)}`
+        : (state.statsError || "正在读取统计...");
+      if (!state.statsLoaded) {
+        nodes.monthlyEnvironmentStats.textContent = state.statsError || "正在读取统计...";
+        return;
+      }
+      const ids = Object.keys(state.authorizationLabels).sort((a, b) =>
+        (state.stats.byAuthorization[b]?.tokens || 0) - (state.stats.byAuthorization[a]?.tokens || 0)
+        || state.authorizationLabels[a].localeCompare(state.authorizationLabels[b], "zh-CN"));
+      nodes.monthlyEnvironmentStats.innerHTML = ids.length
+        ? `<table class="model-table"><thead><tr><th>环境描述</th><th>成功</th><th>失败</th><th>累计 Tokens</th></tr></thead><tbody>${ids.map((id) => {
+            const counts = state.stats.byAuthorization[id] || {};
+            return `<tr><td class="model-name">${escapeHtml(state.authorizationLabels[id])}</td><td>${number(counts.success)}</td><td>${number(counts.fail)}</td><td class="token-value">${number(counts.tokens)}</td></tr>`;
+          }).join("")}</tbody></table>`
+        : "尚未配置密钥";
+    }
+
+    function renderDailyStats() {
+      refreshScopeSelect(nodes.dailyTarget, scopeOptions());
       if (!state.daily) {
         nodes.dailyMetrics.innerHTML = "";
         nodes.dailyStats.textContent = state.dailyError || state.statsError || "正在读取统计...";
         return;
       }
-      const number = (value) => Number(value || 0).toLocaleString("zh-CN");
-      const [kind, id] = nodes.dailyTarget.value.split(":");
-      const selectedCounts = kind === "environment" ? state.daily.environments?.[id]
+      const [kind, id] = selectedScope(nodes.dailyTarget);
+      const selected = kind === "environment" ? state.daily.environments?.[id]
         : kind === "project" ? state.daily.projects?.[id] : state.daily.global;
-      const selected = selectedCounts || state.daily.global || {};
-      const metrics = [
-        ["Token 总用量", number(selected.tokens)],
-        ["输入 Token", number(selected.input_tokens)],
-        ["输出 Token", number(selected.output_tokens)],
-        ["调用次数", number(selected.calls ?? (Number(selected.success || 0) + Number(selected.fail || 0)))],
-        ["调用成功率", selected.success_rate == null ? "—" : `${Number(selected.success_rate).toFixed(2)}%`],
-        ["平均响应时长", selected.avg_duration_ms == null ? "—" : `${(Number(selected.avg_duration_ms) / 1000).toFixed(2)} 秒`]
-      ];
-      nodes.dailyMetrics.innerHTML = metrics.map(([label, value]) =>
-        `<div class="daily-metric"><div class="daily-metric-label">${label}</div><div class="daily-metric-value">${value}</div></div>`).join("");
-      function row(name, counts = {}, isProject = false) {
-        const calls = Number(counts.success || 0) + Number(counts.fail || 0);
-        const rate = calls ? `${(Number(counts.success || 0) * 100 / calls).toFixed(1)}%` : "—";
-        const average = calls ? `${(Number(counts.duration_ms || 0) / calls).toFixed(1)} ms` : "—";
-        return `<tr><td class="${isProject ? "project-name" : "model-name"}">${escapeHtml(name)}</td><td>${number(calls)}</td><td>${number(counts.success)}</td><td>${number(counts.fail)}</td><td>${rate}</td><td>${number(counts.input_tokens)}</td><td>${number(counts.output_tokens)}</td><td class="token-value">${number(counts.tokens)}</td><td>${average}</td></tr>`;
-      }
-      const rows = [row("全部调用", state.daily.global)];
-      for (const [id, label] of Object.entries(state.authorizationLabels)) {
-        rows.push(row(label, state.daily.environments?.[id]));
+      renderMetricCards(nodes.dailyMetrics, selected || state.daily.global || {});
+      const rows = [{label: "全部调用", counts: state.daily.global}];
+      for (const [environmentId, label] of Object.entries(state.authorizationLabels)) {
+        rows.push({label, counts: state.daily.environments?.[environmentId]});
         for (const [projectId, project] of Object.entries(state.projectLabels)) {
-          if (project.environment_id === id) {
-            rows.push(row(`↳ ${project.name}`, state.daily.projects?.[projectId], true));
+          if (project.environment_id === environmentId) {
+            rows.push({label: `↳ ${project.name}`, counts: state.daily.projects?.[projectId], isProject: true});
           }
         }
       }
-      nodes.dailyStats.innerHTML = `<table class="model-table daily-table"><thead><tr><th>环境 / 项目</th><th>调用次数</th><th>成功</th><th>失败</th><th>成功率</th><th>输入 Tokens</th><th>输出 Tokens</th><th>总 Tokens</th><th>平均响应时长</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+      renderUsageTable(nodes.dailyStats, "环境 / 项目", rows, "暂无环境或项目统计");
     }
 
+    function renderModelDailyStats() {
+      refreshScopeSelect(nodes.modelDailyTarget, scopeOptions());
+      if (!state.daily) {
+        nodes.modelDailyMetrics.innerHTML = "";
+        nodes.modelDailyStats.textContent = state.dailyError || state.statsError || "正在读取统计...";
+        return;
+      }
+      const [kind, id] = selectedScope(nodes.modelDailyTarget);
+      const models = kind === "environment" ? state.daily.environment_models?.[id] || {}
+        : kind === "project" ? state.daily.project_models?.[id] || {}
+        : state.daily.models || {};
+      const total = {success: 0, fail: 0, tokens: 0, input_tokens: 0, output_tokens: 0, duration_ms: 0};
+      const rows = Object.keys(models).sort().map((name) => {
+        const counts = models[name];
+        for (const metric of Object.keys(total)) total[metric] += Number(counts[metric] || 0);
+        return {label: name, counts};
+      });
+      renderMetricCards(nodes.modelDailyMetrics, total);
+      renderUsageTable(nodes.modelDailyStats, "模型", rows, "暂无模型统计");
+    }
     function renderEventDetails(details) {
       if (!details || !details.length) {
         return "";
@@ -1165,6 +1224,7 @@
     function renderAll() {
       renderStats();
       renderDailyStats();
+      renderModelDailyStats();
       renderConnections();
       renderStatsEvents();
       renderAuthorizationMappings();
@@ -1198,6 +1258,7 @@
         state.daily = payload.daily || null;
         state.dailyError = null;
         if (!selectedDate && payload.daily?.date) nodes.dailyDate.value = payload.daily.date;
+        nodes.modelDailyDate.value = nodes.dailyDate.value;
         if (!dailyOnly && state.statsRevision === revision) {
           applyStats(payload);
         }
@@ -1210,6 +1271,7 @@
       }
       renderStats();
       renderDailyStats();
+      renderModelDailyStats();
     }
 
     function scheduleDailyRefresh() {
@@ -1333,12 +1395,23 @@
       }
     });
     nodes.dailyDate.addEventListener("change", () => {
+      nodes.modelDailyDate.value = nodes.dailyDate.value;
       state.daily = null;
       state.dailyError = null;
       renderDailyStats();
+      renderModelDailyStats();
+      loadStatsSnapshot(true);
+    });
+    nodes.modelDailyDate.addEventListener("change", () => {
+      nodes.dailyDate.value = nodes.modelDailyDate.value;
+      state.daily = null;
+      state.dailyError = null;
+      renderDailyStats();
+      renderModelDailyStats();
       loadStatsSnapshot(true);
     });
     nodes.dailyTarget.addEventListener("change", renderDailyStats);
+    nodes.modelDailyTarget.addEventListener("change", renderModelDailyStats);
     nodes.projectForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {

@@ -176,6 +176,8 @@ def record_stats(request, success: bool, usage=None):
         dimensions["authorization"] = authorization_id
     if project_id := request.get("stats_project_id"):
         dimensions["project"] = project_id
+    if model := request.get("stats_model"):
+        dimensions["model"] = model
     total, input_tokens, output_tokens = usage_counts(usage)
     duration_ms = max(0, int((time.monotonic() - request["stats_start_ts"]) * 1000))
     request.app["stats"].record(success, total, dimensions,
@@ -253,6 +255,8 @@ async def conn_broadcast_middleware(request, handler):
 
         if request.path == "/file_parse":
             proxy_req = {"service": "mineru", "backend": MINERU_ROUTE["backend"] if MINERU_ROUTE else "-"}
+            if MINERU_ROUTE:
+                request["stats_model"] = next(name for name, route in MODEL_ROUTES.items() if route is MINERU_ROUTE)
         else:
             try:
                 proxy_req = await request.json()
@@ -317,6 +321,7 @@ async def proxy_json_request(request, upstream_path: str):
         record_stats(request, success=False)
         return web.json_response({"error": route_error}, status=route_status)
 
+    request["stats_model"] = proxy_req["model"]
     upstream_req = dict(proxy_req)
     upstream_req["model"] = route["upstream_model"]
     if upstream_req.get("stream") and request.path == "/v1/chat/completions" and route["stream_include_usage"]:
@@ -641,6 +646,7 @@ async def stats(request):
         labels,
         project_labels,
         day,
+        model_names=list(MODEL_ROUTES),
     )
     return web.json_response(snapshot, headers={"Cache-Control": "no-store"})
 
