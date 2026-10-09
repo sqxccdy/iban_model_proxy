@@ -68,6 +68,7 @@ class DailyHttpTests(unittest.IsolatedAsyncioTestCase):
                     "api_key": "unused", "upstream_model": "test-model",
                     "chat_template_kwargs": {}, "stream_include_usage": True,
                 }}
+                main.MODEL_ROUTES["other-model"] = dict(main.MODEL_ROUTES["test-model"], upstream_model="other-model")
 
                 redis = Redis(unix_socket_path=socket, encoding="utf-8", decode_responses=True)
                 session = ClientSession()
@@ -113,31 +114,50 @@ class DailyHttpTests(unittest.IsolatedAsyncioTestCase):
                     json={"model": "test-model", "messages": [], "fail": True})
                 self.assertEqual(response.status, 503)
                 await response.read()
+                response = await client.post("/v1/chat/completions", headers={"Authorization": "Bearer project-key"},
+                    json={"model": "other-model", "messages": []})
+                self.assertEqual(response.status, 200)
+                await response.read()
 
                 for _ in range(100):
                     response = await client.get(f"/stats?date={current_stats_day()}")
                     snapshot = await response.json()
-                    if snapshot["daily"]["global"]["calls"] == 4:
+                    if snapshot["daily"]["global"]["calls"] == 5:
                         break
                     await asyncio.sleep(0.03)
                 else:
                     self.fail("daily counters did not flush")
                 daily = snapshot["daily"]
-                self.assertEqual(daily["global"]["tokens"], 24)
-                self.assertEqual(daily["global"]["input_tokens"], 16)
-                self.assertEqual(daily["global"]["output_tokens"], 8)
-                self.assertEqual(daily["global"]["calls"], 4)
-                self.assertEqual(daily["global"]["success_rate"], 75)
+                self.assertEqual(daily["global"]["tokens"], 36)
+                self.assertEqual(daily["global"]["input_tokens"], 24)
+                self.assertEqual(daily["global"]["output_tokens"], 12)
+                self.assertEqual(daily["global"]["calls"], 5)
+                self.assertEqual(daily["global"]["success_rate"], 80)
                 self.assertIsInstance(daily["global"]["avg_duration_ms"], (int, float))
                 self.assertGreaterEqual(daily["global"]["avg_duration_ms"], 0)
                 self.assertEqual(len(daily["environments"]), 1)
                 self.assertEqual(len(daily["projects"]), 1)
+                self.assertEqual(snapshot["by_model"]["test-model"], {"success": 3, "fail": 1, "tokens": 24})
+                self.assertEqual(snapshot["by_model"]["other-model"], {"success": 1, "fail": 0, "tokens": 12})
+                self.assertEqual(daily["models"]["test-model"]["input_tokens"], 16)
+                self.assertEqual(daily["models"]["test-model"]["calls"], 4)
+                self.assertEqual(daily["models"]["other-model"]["tokens"], 12)
+                project_id = next(iter(daily["projects"]))
+                self.assertEqual(snapshot["by_project_model"][project_id]["test-model"]["tokens"], 17)
+                self.assertEqual(snapshot["by_project_model"][project_id]["test-model"]["input_tokens"], 11)
+                self.assertEqual(daily["project_models"][project_id]["test-model"]["calls"], 2)
+                self.assertEqual(snapshot["by_project_model"][project_id]["other-model"]["tokens"], 12)
+                self.assertEqual(daily["project_models"][project_id]["other-model"]["calls"], 1)
+                environment_id = next(iter(daily["environments"]))
+                self.assertEqual(snapshot["by_environment_model"][environment_id]["test-model"]["tokens"], 24)
+                self.assertEqual(snapshot["by_environment_model"][environment_id]["other-model"]["tokens"], 12)
+                self.assertEqual(daily["environment_models"][environment_id]["test-model"]["calls"], 3)
                 environment = next(iter(daily["environments"].values()))
                 project = next(iter(daily["projects"].values()))
-                self.assertEqual((environment["tokens"], environment["calls"]), (24, 3))
-                self.assertEqual((project["tokens"], project["calls"]), (17, 2))
-                self.assertEqual(project["input_tokens"], 11)
-                self.assertEqual(project["output_tokens"], 6)
+                self.assertEqual((environment["tokens"], environment["calls"]), (36, 4))
+                self.assertEqual((project["tokens"], project["calls"]), (29, 3))
+                self.assertEqual(project["input_tokens"], 19)
+                self.assertEqual(project["output_tokens"], 10)
                 self.assertNotIn("project-key", json.dumps(snapshot))
             finally:
                 main.MODEL_ROUTES = old_routes

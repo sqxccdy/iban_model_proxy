@@ -84,15 +84,34 @@ class StatsRecorderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(recorder.pending), 2)
         self.assertEqual(sum(value[2] for value in recorder.pending.values()), 16)
 
+    async def test_model_dimension_separates_requests_with_same_project(self):
+        recorder = StatsRecorder(None, [], "events")
+        recorder.record(True, 7, {"project": "project-a", "model": "model-a"})
+        recorder.record(False, 0, {"project": "project-a", "model": "model-b"})
+        self.assertEqual(len(recorder.pending), 2)
+        by_model = {dict(dimensions)["model"]: counts for (_, dimensions), counts in recorder.pending.items()}
+        self.assertEqual(by_model["model-a"][:3], [1, 0, 7])
+        self.assertEqual(by_model["model-b"][:3], [0, 1, 0])
+
     async def test_snapshot_daily_hierarchy_derived_metrics_and_monthly_compatibility(self):
         day = "2026-09-12"
         data = {"month": current_stats_day()[:7], "success": "4", "fail": "1", "tokens": "31",
-                "llm:stats:dimension:authorization:tokens": {"env-a": "31"}}
+                "llm:stats:dimension:authorization:tokens": {"env-a": "31"},
+                "llm:stats:dimension:model:success": {"model-a": "3"},
+                "llm:stats:dimension:model:fail": {"model-a": "1"},
+                "llm:stats:dimension:model:tokens": {"model-a": "31"},
+                "llm:stats:dimension:project_model:tokens": {"project-a:model-a": "19"},
+                "llm:stats:dimension:project_model:input_tokens": {"project-a:model-a": "12"},
+                "llm:stats:dimension:project_model:output_tokens": {"project-a:model-a": "7"},
+                "llm:stats:dimension:environment_model:tokens": {"env-a:model-a": "31"}}
         for metric, value in zip(METRICS, (3, 1, 31, 20, 11, 1000)):
             data[f"llm:stats:daily:{day}:{metric}"] = {
-                "global": str(value), "authorization:env-a": str(value), "project:project-a": str(value)}
+                "global": str(value), "authorization:env-a": str(value), "project:project-a": str(value),
+                "model:model-a": str(value), "project_model:project-a:model-a": str(value),
+                "environment_model:env-a:model-a": str(value)}
         snapshot = await get_stats_snapshot(SnapshotRedis(data), ["month", "success", "fail", "tokens"],
-                    {"env-a": "生产", "unused": "测试"}, {"project-a": {"name": "项目 A", "environment_id": "env-a"}}, day)
+                    {"env-a": "生产", "unused": "测试"}, {"project-a": {"name": "项目 A", "environment_id": "env-a"}}, day,
+                    model_names=["model-a", "unused-model"])
         daily = snapshot["daily"]
         self.assertEqual(snapshot["total_tokens"], 31)
         self.assertEqual(daily["date"], day)
@@ -100,6 +119,14 @@ class StatsRecorderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(daily["projects"]["project-a"]["success_rate"], 75)
         self.assertEqual(daily["projects"]["project-a"]["avg_duration_ms"], 250)
         self.assertEqual(daily["global"]["tokens"], 31)
+        self.assertEqual(snapshot["by_model"]["model-a"], {"success": 3, "fail": 1, "tokens": 31})
+        self.assertEqual(daily["models"]["model-a"]["calls"], 4)
+        self.assertEqual(daily["models"]["unused-model"]["calls"], 0)
+        self.assertEqual(snapshot["by_project_model"]["project-a"]["model-a"]["tokens"], 19)
+        self.assertEqual(snapshot["by_project_model"]["project-a"]["model-a"]["input_tokens"], 12)
+        self.assertEqual(daily["project_models"]["project-a"]["model-a"]["tokens"], 31)
+        self.assertEqual(snapshot["by_environment_model"]["env-a"]["model-a"]["tokens"], 31)
+        self.assertEqual(daily["environment_models"]["env-a"]["model-a"]["calls"], 4)
         self.assertIsNone(daily["environments"]["unused"]["success_rate"])
         self.assertIsNone(daily["environments"]["unused"]["avg_duration_ms"])
 
