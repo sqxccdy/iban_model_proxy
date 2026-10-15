@@ -79,7 +79,7 @@ def load_model_config() -> dict:
         base_url = model_config.get("base_url")
         style = normalize_model_style(model_config.get("style"))
         upstream_model = model_config.get("upstream_model") or request_model
-        chat_template_kwargs = model_config.get("chat_template_kwargs") or {}
+        extra_params = model_config.get("extra_params") or {}
         stream_include_usage = model_config.get("stream_include_usage", True)
 
         if not base_url:
@@ -90,7 +90,7 @@ def load_model_config() -> dict:
             )
         if style != "mineru" and not api_key:
             raise RuntimeError(f"Model '{request_model}' missing api_key")
-        if not isinstance(chat_template_kwargs, dict):
+        if not isinstance(extra_params, dict):
             raise RuntimeError(f"Model '{request_model}' extra_params must be a mapping")
         if not isinstance(stream_include_usage, bool):
             raise RuntimeError(f"Model '{request_model}' stream_include_usage must be a boolean")
@@ -100,7 +100,7 @@ def load_model_config() -> dict:
             "base_url": str(base_url).rstrip("/"),
             "style": style,
             "upstream_model": upstream_model,
-            "chat_template_kwargs": dict(chat_template_kwargs),
+            "extra_params": dict(extra_params),
             "stream_include_usage": stream_include_usage,
             "backend": str(model_config.get("backend") or DEFAULT_MINERU_BACKEND),
         }
@@ -333,8 +333,8 @@ async def proxy_json_request(request, upstream_path: str):
             stream_options = dict(stream_options)
             upstream_req["stream_options"] = stream_options
             stream_options.setdefault("include_usage", True)
-    if route["chat_template_kwargs"]:
-        upstream_req["chat_template_kwargs"] = route["chat_template_kwargs"]
+    if route["extra_params"]:
+        upstream_req["extra_body"] = route["extra_params"]
 
     session = request.app["client_session"]
     upstream_start_ts = time.monotonic()
