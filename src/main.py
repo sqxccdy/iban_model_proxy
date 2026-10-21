@@ -4,6 +4,7 @@ import re
 import time
 import json
 import logging
+from http import HTTPStatus
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -12,8 +13,8 @@ import aiohttp
 import yaml
 from redis.asyncio import Redis
 from aiohttp import web, ClientSession, ClientTimeout
-from .stats import StatsRecorder, get_stats_snapshot, extract_usage, usage_counts
-from .key_registry import (
+from src.stats import StatsRecorder, get_stats_snapshot, extract_usage, usage_counts
+from src.key_registry import (
     AUTHORIZATION_MAPPING_KEY, PROJECT_MAPPING_KEY, normalize_authorization,
     authorization_stats_id, get_authorization_mappings, get_project_mappings,
     get_authorization_context, mutate_registry,
@@ -232,6 +233,39 @@ def publish_broadcast_background(app, payload):
             logging.exception("Connection event publish failed")
 
     task.add_done_callback(completed)
+
+
+def request_remote(request) -> str:
+    peername = request.transport.get_extra_info("peername") if request.transport else None
+    if isinstance(peername, (tuple, list)) and len(peername) >= 2:
+        return f"{peername[0]}:{peername[1]}"
+    return request.remote or "-"
+
+
+@web.middleware
+async def request_log_middleware(request, handler):
+    status = 500
+    reason = HTTPStatus.INTERNAL_SERVER_ERROR.phrase
+    try:
+        response = await handler(request)
+        status = response.status
+        reason = response.reason or HTTPStatus(status).phrase
+        return response
+    except web.HTTPException as exc:
+        status = exc.status
+        reason = exc.reason or HTTPStatus(status).phrase
+        raise
+    finally:
+        publish_broadcast_background(request.app, {
+            "type": "request_log",
+            "remote": request_remote(request),
+            "method": request.method,
+            "path": request.path_qs,
+            "http_version": f"HTTP/{request.version.major}.{request.version.minor}",
+            "status": status,
+            "reason": reason,
+            "ts": int(time.time() * 1000),
+        })
 
 
 @web.middleware
@@ -681,7 +715,7 @@ async def cleanup(app):
 
 
 app = web.Application(
-    middlewares=[conn_broadcast_middleware],
+    middlewares=[request_log_middleware, conn_broadcast_middleware],
     client_max_size=MAX_UPLOAD_SIZE,
 )
 app.router.add_post("/v1/chat/completions", chat)
