@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from src.key_registry import REGISTRY_SCRIPT
-from src.stats import STATS_SCRIPT
+from src.stats import BATCH_RETENTION_SECONDS, DAILY_RETENTION_SECONDS, STATS_SCRIPT
 
 
 @unittest.skipUnless(os.environ.get("RUN_REDIS_LUA") == "1", "set RUN_REDIS_LUA=1 to run a temporary Redis")
@@ -70,10 +70,12 @@ class RedisLuaTests(unittest.TestCase):
 
                 def stats(month, items, batch_id, ledger_month=None):
                     return cli("--eval", stats_script, *keys, ",", month, json.dumps(items),
-                               1000, batch_id, ledger_month or month)
+                               1000, batch_id, ledger_month or month,
+                               DAILY_RETENTION_SECONDS, BATCH_RETENTION_SECONDS)
 
                 self.assertEqual(stats("2026-09", batch, "batch-a"), "1")
                 self.assertEqual(cli("HGET", "llm:stats:daily:2026-09-29:tokens", "global"), "18")
+                self.assertGreater(int(cli("TTL", "llm:stats:daily:2026-09-29:tokens")), 0)
                 self.assertEqual(cli("HGET", "llm:stats:daily:2026-09-29:tokens", "authorization:env-id"), "18")
                 self.assertEqual(cli("HGET", "llm:stats:daily:2026-09-29:tokens", "project:project-id"), "6")
                 self.assertEqual(cli("HGET", "llm:stats:daily:2026-09-29:input_tokens", "global"), "11")
@@ -91,6 +93,21 @@ class RedisLuaTests(unittest.TestCase):
                 self.assertEqual(stats("2026-10", batch, "batch-a", "2026-09"), "0")
                 self.assertEqual(cli("HGET", "llm:stats:daily:2026-09-29:tokens", "global"), "18")
                 self.assertEqual(cli("GET", "llm:stats:month"), "2026-10")
+                # Repeated writes must not extend any existing statistics TTL.
+                daily_key = 'llm:stats:daily:2026-10-01:tokens'
+                model_key = 'llm:stats:dimension:model:tokens'
+                cli('HSET', model_key, 'gpt-4o', 123)
+                cli('SADD', keys[4], model_key)
+                for key in (daily_key, model_key, keys[3]):
+                    cli('PEXPIRE', key, 1000)
+                october[0]['dimensions']['model'] = 'current-model'
+                self.assertEqual(stats('2026-10', october, 'batch-c'), '1')
+                for key in (daily_key, model_key, keys[3]):
+                    self.assertLessEqual(int(cli('PTTL', key)), 1000)
+                    self.assertGreater(int(cli('PTTL', key)), 0)
+                time.sleep(1.05)
+                for key in (daily_key, model_key, keys[3]):
+                    self.assertEqual(cli('EXISTS', key), '0')
             finally:
                 server.terminate()
                 server.wait(timeout=5)

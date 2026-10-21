@@ -1,8 +1,18 @@
 import asyncio
 import json
 import unittest
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-from src.stats import StatsRecorder, get_stats_snapshot, current_stats_day, usage_counts, METRICS
+from src.stats import (
+    DAILY_RETENTION_SECONDS,
+    StatsRecorder,
+    get_stats_snapshot,
+    current_stats_day,
+    prune_daily_stats,
+    usage_counts,
+    METRICS,
+)
 
 
 class WaitingRedis:
@@ -56,6 +66,36 @@ class SnapshotRedis:
 
 
 class StatsRecorderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_prunes_old_daily_keys_and_expires_recent_keys(self):
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        recent = f"llm:stats:daily:{today:%Y-%m-%d}:tokens"
+        old = f"llm:stats:daily:{today - timedelta(days=30):%Y-%m-%d}:tokens"
+
+        class CleanupRedis:
+            deleted = []
+            expirations = []
+
+            async def scan_iter(self, **kwargs):
+                for key in (recent, old, "llm:stats:dimension:model:tokens"):
+                    yield key
+
+            async def delete(self, *keys):
+                self.deleted.extend(keys)
+
+            async def expire(self, key, seconds, nx=False, lt=False):
+                self.expirations.append((key, seconds, nx, lt))
+
+        redis = CleanupRedis()
+        await prune_daily_stats(redis)
+
+        self.assertEqual(redis.deleted, [old])
+        self.assertEqual(redis.expirations, [
+            (recent, DAILY_RETENTION_SECONDS, True, False),
+            (recent, DAILY_RETENTION_SECONDS, False, True),
+            ('llm:stats:dimension:model:tokens', DAILY_RETENTION_SECONDS, True, False),
+            ('llm:stats:dimension:model:tokens', DAILY_RETENTION_SECONDS, False, True),
+        ])
+
     async def test_record_does_not_wait_for_redis_and_coalesces_all_metrics(self):
         redis = WaitingRedis()
         recorder = StatsRecorder(redis, ["month", "success", "fail", "tokens", "keys", "batches"], "events")
@@ -67,13 +107,13 @@ class StatsRecorderTests(unittest.IsolatedAsyncioTestCase):
         # The flush is still waiting for Redis; the request-side record remains immediate.
         recorder.record(True, 5, dims, input_tokens=3, output_tokens=2, duration_ms=200)
         self.assertEqual(sum(counts[0] for counts in recorder.pending.values()), 1)
-        batch = json.loads(redis.calls[0][-4])
+        batch = json.loads(redis.calls[0][-6])
         self.assertEqual(batch, [{"day": current_stats_day(), "dimensions": dims,
             "success": 1, "fail": 1, "tokens": 12, "input_tokens": 8,
             "output_tokens": 4, "duration_ms": 400}])
         redis.release.set()
         await recorder.close()
-        second = json.loads(redis.calls[1][-4])[0]
+        second = json.loads(redis.calls[1][-6])[0]
         self.assertEqual(second["tokens"], 5)
         self.assertEqual(second["duration_ms"], 200)
 

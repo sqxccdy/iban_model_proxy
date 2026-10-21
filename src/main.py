@@ -7,12 +7,20 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import yaml
 from redis.asyncio import Redis
 from aiohttp import web, ClientSession, ClientTimeout
-from .stats import StatsRecorder, get_stats_snapshot, extract_usage, usage_counts
+from .stats import (
+    DAILY_RETENTION_DAYS,
+    StatsRecorder,
+    get_stats_snapshot,
+    extract_usage,
+    prune_daily_stats,
+    usage_counts,
+)
 from .key_registry import (
     AUTHORIZATION_MAPPING_KEY, PROJECT_MAPPING_KEY, normalize_authorization,
     authorization_stats_id, get_authorization_mappings, get_project_mappings,
@@ -640,6 +648,18 @@ async def stats(request):
                 raise ValueError
         except ValueError:
             return web.json_response({"error": "date must be YYYY-MM-DD"}, status=400)
+        requested_day = datetime.strptime(day, "%Y-%m-%d").date()
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+        if requested_day > today:
+            return web.json_response({"error": "date must not be in the future"}, status=400)
+        if (today - requested_day).days >= DAILY_RETENTION_DAYS:
+            return web.json_response(
+                {
+                    "error": "daily statistics have expired; query the persistent backend",
+                    "retention_days": DAILY_RETENTION_DAYS,
+                },
+                status=410,
+            )
     snapshot = await get_stats_snapshot(
         request.app["redis"],
         [STATS_MONTH_KEY, SUCCESS_COUNT_KEY, FAIL_COUNT_KEY, TOTAL_TOKENS_KEY],
@@ -657,6 +677,7 @@ async def monitor(request):
 
 async def startup(app):
     app["redis"] = Redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+    await prune_daily_stats(app["redis"])
     app["broadcast_tasks"] = set()
     app["client_session"] = ClientSession(timeout=ClientTimeout(total=300))
     app["stats"] = StatsRecorder(

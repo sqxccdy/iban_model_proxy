@@ -6,17 +6,48 @@ import logging
 import re
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 
 STAT_TIMEZONE = ZoneInfo("Asia/Shanghai")
 METRICS = ("success", "fail", "tokens", "input_tokens", "output_tokens", "duration_ms")
+DAILY_RETENTION_DAYS = 3
+DAILY_RETENTION_SECONDS = DAILY_RETENTION_DAYS * 86400
+BATCH_RETENTION_SECONDS = DAILY_RETENTION_SECONDS
 
 
 def current_stats_day():
     return datetime.now(STAT_TIMEZONE).strftime("%Y-%m-%d")
+
+
+async def prune_daily_stats(redis):
+    """Bound all legacy statistics keys to 72h without renewing existing TTLs.
+
+    Registry keys (monitor:*) store credentials/configuration and are excluded.
+    """
+    today = datetime.now(STAT_TIMEZONE).date()
+    cutoff = today - timedelta(days=DAILY_RETENTION_DAYS - 1)
+    expired = []
+    retained = []
+    async for key in redis.scan_iter(match="llm:stats:*", count=100):
+        match = re.fullmatch(
+            r"llm:stats:daily:(\d{4}-\d{2}-\d{2}):[a-z_]+", key
+        )
+        if not match:
+            retained.append(key)
+            continue
+        try:
+            day = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        (expired if day < cutoff else retained).append(key)
+    if expired:
+        await redis.delete(*expired)
+    for key in retained:
+        await redis.expire(key, DAILY_RETENTION_SECONDS, nx=True)
+        await redis.expire(key, DAILY_RETENTION_SECONDS, lt=True)
 
 
 def extract_usage(payload):
@@ -66,7 +97,7 @@ end
 
 local ledger = KEYS[6] .. ':' .. ARGV[5]
 if redis.call('SADD', ledger, ARGV[4]) == 0 then return 0 end
-redis.call('EXPIRE', ledger, 7776000)
+redis.call('EXPIRE', ledger, ARGV[7], 'NX')
 local batch = cjson.decode(ARGV[2])
 local success = 0
 local fail = 0
@@ -85,6 +116,7 @@ for _, item in ipairs(batch) do
         if count > 0 then
             local daily_key = 'llm:stats:daily:' .. item.day .. ':' .. metric
             redis.call('HINCRBY', daily_key, 'global', count)
+            redis.call('EXPIRE', daily_key, ARGV[6], 'NX')
             for dimension, value in pairs(item.dimensions) do
                 redis.call('HINCRBY', daily_key, dimension .. ':' .. value, count)
             end
@@ -133,6 +165,12 @@ local totals = {
     fail_count = redis.call('INCRBY', KEYS[3], fail),
     total_tokens = redis.call('INCRBY', KEYS[4], tokens),
 }
+-- Never extend a statistics key's lifetime when new requests arrive.
+-- Otherwise active models keep old model fields in shared hashes forever.
+for i = 1, 6 do redis.call('EXPIRE', KEYS[i], ARGV[6], 'NX') end
+for _, key in ipairs(redis.call('SMEMBERS', KEYS[5])) do
+    redis.call('EXPIRE', key, ARGV[6], 'NX')
+end
 local by_authorization = {}
 for _, metric in ipairs({'success', 'fail', 'tokens'}) do
     local rows = redis.call('HGETALL', 'llm:stats:dimension:authorization:' .. metric)
@@ -375,7 +413,7 @@ class StatsRecorder:
                 self.pending = defaultdict(lambda: [0] * len(METRICS))
                 self.wakeup.clear()
             batch_id = uuid4().hex
-            ledger_month = current_stats_day()[:7]
+            ledger_day = current_stats_day()
             payload = [
                 {"day": day, "dimensions": dict(dimensions), "success": counts[0],
                  "fail": counts[1], "tokens": counts[2], "input_tokens": counts[3],
@@ -387,7 +425,8 @@ class StatsRecorder:
                     await self.redis.eval(
                         STATS_SCRIPT, len(self.keys) + 1, *self.keys, self.channel,
                         current_stats_day()[:7],
-                        json.dumps(payload, ensure_ascii=False), int(time.time() * 1000), batch_id, ledger_month,
+                        json.dumps(payload, ensure_ascii=False), int(time.time() * 1000), batch_id, ledger_day,
+                        DAILY_RETENTION_SECONDS, BATCH_RETENTION_SECONDS,
                     )
                     break
                 except Exception:
