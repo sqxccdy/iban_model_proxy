@@ -4,6 +4,7 @@ import re
 import time
 import json
 import logging
+from http import HTTPStatus
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -13,7 +14,7 @@ import aiohttp
 import yaml
 from redis.asyncio import Redis
 from aiohttp import web, ClientSession, ClientTimeout
-from .stats import (
+from src.stats import (
     DAILY_RETENTION_DAYS,
     StatsRecorder,
     get_stats_snapshot,
@@ -21,7 +22,7 @@ from .stats import (
     prune_daily_stats,
     usage_counts,
 )
-from .key_registry import (
+from src.key_registry import (
     AUTHORIZATION_MAPPING_KEY, PROJECT_MAPPING_KEY, normalize_authorization,
     authorization_stats_id, get_authorization_mappings, get_project_mappings,
     get_authorization_context, mutate_registry,
@@ -87,7 +88,7 @@ def load_model_config() -> dict:
         base_url = model_config.get("base_url")
         style = normalize_model_style(model_config.get("style"))
         upstream_model = model_config.get("upstream_model") or request_model
-        chat_template_kwargs = model_config.get("chat_template_kwargs") or {}
+        extra_params = model_config.get("extra_params") or {}
         stream_include_usage = model_config.get("stream_include_usage", True)
 
         if not base_url:
@@ -98,7 +99,7 @@ def load_model_config() -> dict:
             )
         if style != "mineru" and not api_key:
             raise RuntimeError(f"Model '{request_model}' missing api_key")
-        if not isinstance(chat_template_kwargs, dict):
+        if not isinstance(extra_params, dict):
             raise RuntimeError(f"Model '{request_model}' extra_params must be a mapping")
         if not isinstance(stream_include_usage, bool):
             raise RuntimeError(f"Model '{request_model}' stream_include_usage must be a boolean")
@@ -108,7 +109,7 @@ def load_model_config() -> dict:
             "base_url": str(base_url).rstrip("/"),
             "style": style,
             "upstream_model": upstream_model,
-            "chat_template_kwargs": dict(chat_template_kwargs),
+            "extra_params": dict(extra_params),
             "stream_include_usage": stream_include_usage,
             "backend": str(model_config.get("backend") or DEFAULT_MINERU_BACKEND),
         }
@@ -242,6 +243,39 @@ def publish_broadcast_background(app, payload):
     task.add_done_callback(completed)
 
 
+def request_remote(request) -> str:
+    peername = request.transport.get_extra_info("peername") if request.transport else None
+    if isinstance(peername, (tuple, list)) and len(peername) >= 2:
+        return f"{peername[0]}:{peername[1]}"
+    return request.remote or "-"
+
+
+@web.middleware
+async def request_log_middleware(request, handler):
+    status = 500
+    reason = HTTPStatus.INTERNAL_SERVER_ERROR.phrase
+    try:
+        response = await handler(request)
+        status = response.status
+        reason = response.reason or HTTPStatus(status).phrase
+        return response
+    except web.HTTPException as exc:
+        status = exc.status
+        reason = exc.reason or HTTPStatus(status).phrase
+        raise
+    finally:
+        publish_broadcast_background(request.app, {
+            "type": "request_log",
+            "remote": request_remote(request),
+            "method": request.method,
+            "path": request.path_qs,
+            "http_version": f"HTTP/{request.version.major}.{request.version.minor}",
+            "status": status,
+            "reason": reason,
+            "ts": int(time.time() * 1000),
+        })
+
+
 @web.middleware
 async def conn_broadcast_middleware(request, handler):
     if request.path not in PROXY_REQUEST_PATHS or request.method != "POST":
@@ -341,8 +375,8 @@ async def proxy_json_request(request, upstream_path: str):
             stream_options = dict(stream_options)
             upstream_req["stream_options"] = stream_options
             stream_options.setdefault("include_usage", True)
-    if route["chat_template_kwargs"]:
-        upstream_req["chat_template_kwargs"] = route["chat_template_kwargs"]
+    if route["extra_params"]:
+        upstream_req["extra_body"] = route["extra_params"]
 
     session = request.app["client_session"]
     upstream_start_ts = time.monotonic()
@@ -702,7 +736,7 @@ async def cleanup(app):
 
 
 app = web.Application(
-    middlewares=[conn_broadcast_middleware],
+    middlewares=[request_log_middleware, conn_broadcast_middleware],
     client_max_size=MAX_UPLOAD_SIZE,
 )
 app.router.add_post("/v1/chat/completions", chat)

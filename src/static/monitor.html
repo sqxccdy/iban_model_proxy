@@ -720,6 +720,7 @@
         </div>
         <div class="tabs" role="tablist" aria-label="事件分类">
           <button id="connectionsTab" class="tab" type="button" role="tab" aria-selected="true" aria-controls="connectionsPanel">连接</button>
+          <button id="requestsTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="requestsPanel">请求</button>
           <button id="statsTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="statsPanel">统计更新</button>
           <button id="keysTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="keysPanel">密钥管理</button>
         </div>
@@ -731,6 +732,9 @@
             </aside>
             <ul id="connectionList" class="event-list"></ul>
           </div>
+        </div>
+        <div id="requestsPanel" class="tab-panel" role="tabpanel" aria-labelledby="requestsTab" hidden>
+          <ul id="requestList" class="event-list"></ul>
         </div>
         <div id="statsPanel" class="tab-panel" role="tabpanel" aria-labelledby="statsTab" hidden>
           <ul id="statsList" class="event-list"></ul>
@@ -764,6 +768,7 @@
     const state = {
       connections: new Map(),
       selectedConnId: null,
+      requestLogs: [],
       statsEvents: [],
       authorizationMappings: [],
       projectMappings: [],
@@ -798,13 +803,16 @@
       callCount: document.getElementById("callCount"),
       connectionCount: document.getElementById("connectionCount"),
       connectionsTab: document.getElementById("connectionsTab"),
+      requestsTab: document.getElementById("requestsTab"),
       statsTab: document.getElementById("statsTab"),
       keysTab: document.getElementById("keysTab"),
       connectionsPanel: document.getElementById("connectionsPanel"),
+      requestsPanel: document.getElementById("requestsPanel"),
       statsPanel: document.getElementById("statsPanel"),
       keysPanel: document.getElementById("keysPanel"),
       connectionFilterList: document.getElementById("connectionFilterList"),
       connectionList: document.getElementById("connectionList"),
+      requestList: document.getElementById("requestList"),
       statsList: document.getElementById("statsList"),
       monthlyEnvironmentStats: document.getElementById("monthlyEnvironmentStats"),
       modelStatsMeta: document.getElementById("modelStatsMeta"),
@@ -892,6 +900,11 @@
     function pushStatsEvent(item) {
       state.statsEvents.unshift(item);
       state.statsEvents = state.statsEvents.slice(0, 50);
+    }
+
+    function pushRequestLog(item) {
+      state.requestLogs.unshift(item);
+      state.requestLogs = state.requestLogs.slice(0, 100);
     }
 
     function updateLastEventTime(ts) {
@@ -1131,6 +1144,18 @@
       renderList(nodes.statsList, state.statsEvents, "正在等待统计更新...");
     }
 
+    function renderRequestLogs() {
+      renderList(nodes.requestList, state.requestLogs.map((item) => ({
+        title: `${item.method || "-"} ${item.path || "-"}`,
+        ts: item.ts,
+        summary: `INFO:     ${item.remote || "-"} - \"${item.method || "-"} ${item.path || "-"} ${item.http_version || "HTTP/?"}\" ${item.status ?? "-"} ${item.reason || ""}`.trimEnd(),
+        details: [
+          { label: "Remote", value: item.remote || "-" },
+          { label: "Status", value: `${item.status ?? "-"} ${item.reason || ""}`.trim() }
+        ]
+      })), "正在等待请求日志...");
+    }
+
     function renderAuthorizationMappings() {
       const selectedEnvironment = nodes.projectEnvironmentInput.value;
       nodes.projectEnvironmentInput.innerHTML = '<option value="">选择所属环境</option>' + state.authorizationMappings.map((mapping) =>
@@ -1226,6 +1251,7 @@
       renderDailyStats();
       renderModelDailyStats();
       renderConnections();
+      renderRequestLogs();
       renderStatsEvents();
       renderAuthorizationMappings();
       renderProjectMappings();
@@ -1321,6 +1347,10 @@
         });
       }
 
+      if (payload.type === "request_log") {
+        pushRequestLog(payload);
+      }
+
       if (payload.type === "authorization_mappings_update") {
         state.authorizationMappings = payload.mappings || [];
         loadStatsSnapshot();
@@ -1336,9 +1366,11 @@
 
     function showTab(name) {
       nodes.connectionsTab.setAttribute("aria-selected", String(name === "connections"));
+      nodes.requestsTab.setAttribute("aria-selected", String(name === "requests"));
       nodes.statsTab.setAttribute("aria-selected", String(name === "stats"));
       nodes.keysTab.setAttribute("aria-selected", String(name === "keys"));
       nodes.connectionsPanel.hidden = name !== "connections";
+      nodes.requestsPanel.hidden = name !== "requests";
       nodes.statsPanel.hidden = name !== "stats";
       nodes.keysPanel.hidden = name !== "keys";
     }
@@ -1375,6 +1407,7 @@
 
     renderAll();
     nodes.connectionsTab.addEventListener("click", () => showTab("connections"));
+    nodes.requestsTab.addEventListener("click", () => showTab("requests"));
     nodes.statsTab.addEventListener("click", () => showTab("stats"));
     nodes.keysTab.addEventListener("click", () => showTab("keys"));
     nodes.connectionFilterList.addEventListener("click", (event) => {

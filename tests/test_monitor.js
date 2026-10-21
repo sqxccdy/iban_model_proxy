@@ -92,6 +92,20 @@ async function main() {
   assert.match(node("modelDailyStats").innerHTML, /other-model/);
   assert.doesNotMatch(node("modelDailyStats").innerHTML, /订单项目/);
 
+  for (let index = 0; index < 101; index += 1) {
+    eventSource.onmessage({ data: JSON.stringify({
+      type: "request_log", remote: `127.0.0.1:${50000 + index}`,
+      method: index === 100 ? "POST" : "GET", path: `/request-${index}`,
+      http_version: "HTTP/1.1", status: index === 100 ? 405 : 200,
+      reason: index === 100 ? "Method Not Allowed" : "OK", ts: 1000 + index
+    }) });
+  }
+  assert.match(node("requestList").innerHTML, /POST \/request-100 HTTP\/1\.1&quot; 405 Method Not Allowed/);
+  assert.doesNotMatch(node("requestList").innerHTML, /request-0(?:\D|$)/);
+  node("requestsTab").listeners.click();
+  assert.equal(node("requestsPanel").hidden, false);
+  assert.equal(node("connectionsPanel").hidden, true);
+
   node("dailyTarget").value = `environment:${environmentId}`;
   node("dailyTarget").listeners.change();
   assert.match(node("dailyMetrics").innerHTML, />17</);
