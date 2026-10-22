@@ -288,9 +288,13 @@ Content-Type: text/event-stream
 - `llm:stats:daily:YYYY-MM-DD:{success,fail,tokens,input_tokens,output_tokens,duration_ms}`：每日 Redis Hash，字段包含 `global`、`authorization:<密钥标识>`、`project:<密钥标识>`、`model:<模型名>`、`environment_model:<环境标识>:<模型名>` 和 `project_model:<项目标识>:<模型名>`
 - `monitor:project:mappings`、`monitor:project:owners`：项目配置及其环境归属
 - `llm:stats:dimension:keys`：当前月份使用过的维度统计键集合，跨月时清空
-- `llm:stats:batch_ids`：本月已写入的批次标识，用于避免 Redis 重试时重复计数
+- `llm:stats:batch_ids:YYYY-MM-DD`：当日已写入的批次标识，最长保留 72 小时，用于避免 Redis 重试时重复计数
 
 统计在请求协程中只做内存聚合，由后台任务批量写入 Redis 并发布 `stats_update`。`/stats` 提供 `by_model`、`by_environment_model`、`by_project_model` 本月汇总以及对应每日指标。监控页保留整体月度汇总、本月环境表和每日环境→项目表，另加每日模型表；后者可按环境或项目查看各模型的输入、输出和总 Token。环境模型用量包含其项目调用。模型统计按请求中的模型名归类，MinerU 按配置的模型名归类；路由失败且无法识别模型的请求只计入全局。旧数据无法补出环境、项目与模型的交叉明细。
+
+所有 `llm:stats:*` 统计键统一最长保留 72 小时，包括总量、模型/环境/项目聚合、每日明细与批次去重。写入使用 `EXPIRE ... NX`，后续请求不会延长已有键的期限；服务启动时清理过期每日旧键，并为其他旧统计键补齐/缩短 TTL，重启也不会延长既有期限。环境和项目密钥配置 `monitor:*` 不参与统计过期。
+
+`/stats` 汇总是短期缓存值，到期后重新累计；`month` 仅表示当前月份，不能把缓存值当作完整月报。超过每日保留范围的 `/stats?date=...` 返回 HTTP 410。长期报表由 ADP 定时采集每日指标到 `ModelProxyStat`，前端查询 ADP 接口时只读该表。更改 `model.yaml` 不会立即删除统计中已有的模型名；旧模型名会随对应缓存到期消失。仍在运行的模型会继续产生新统计，所以服务有请求时 Redis 不会整体永久为空。
 事件保留原有总数字段，并包含 `by_authorization`、`by_model`、`by_environment_model` 和 `by_project_model` 映射。以后增加统计维度时，可向统计记录器传入新的维度名和值；维度名会自动映射到对应的 Redis Hash。
 Redis 暂时不可用时后台任务会重试；服务退出时最多等待 5 秒完成写入。如果上游没有提供 token usage，就只能记录该次请求的成功或失败，无法准确推算 token。
 

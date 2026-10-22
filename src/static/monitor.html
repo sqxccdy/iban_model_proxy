@@ -623,7 +623,7 @@
         <div class="eyebrow">Realtime SSE Monitor</div>
         <h1>连接监控<br>一眼看清</h1>
         <p class="subtext">
-          页面会从 <span class="mono">/stats</span> 读取本月累计，再订阅 <span class="mono">/events</span> 更新连接和统计。
+          页面会从 <span class="mono">/stats</span> 读取短期统计缓存，再订阅 <span class="mono">/events</span> 更新连接和统计。统计键最长保留 72 小时，历史报表由 ADP 保存。
           下方可按日期查看环境、项目及各模型的 Token、调用次数与响应时长。
         </p>
       </div>
@@ -646,7 +646,7 @@
       </div>
     </section>
 
-    <div class="panel-head"><h2>本月总览</h2><div class="panel-copy" id="modelStatsMeta">正在读取统计...</div></div>
+    <div class="panel-head"><h2>实时统计缓存</h2><div class="panel-copy" id="modelStatsMeta">正在读取统计...</div></div>
     <section class="cards">
       <article class="panel card">
         <div>
@@ -667,19 +667,19 @@
           <h2>Total Tokens</h2>
           <div class="card-value" id="tokenCount">0</div>
         </div>
-        <div class="card-footer">按服务端月度统计自动累计</div>
+        <div class="card-footer">缓存最长保留 72 小时，到期重新累计</div>
       </article>
       <article class="panel card">
         <div>
           <h2>调用次数</h2>
           <div class="card-value" id="callCount">0</div>
         </div>
-        <div class="card-footer">本月成功与失败调用之和</div>
+        <div class="card-footer">当前缓存内成功与失败调用之和</div>
       </article>
     </section>
 
     <section class="panel model-panel" aria-labelledby="monthlyEnvironmentTitle">
-      <div class="panel-head"><div><h2 id="monthlyEnvironmentTitle">本月密钥用量</h2><div class="panel-copy">按环境密钥统计，包含该环境的项目调用。</div></div></div>
+      <div class="panel-head"><div><h2 id="monthlyEnvironmentTitle">缓存内密钥用量</h2><div class="panel-copy">按环境密钥统计，包含该环境的项目调用；缓存到期会清空。</div></div></div>
       <div class="model-table-scroll" id="monthlyEnvironmentStats">正在读取统计...</div>
     </section>
 
