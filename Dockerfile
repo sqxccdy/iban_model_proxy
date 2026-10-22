@@ -1,6 +1,6 @@
 # Author: Mason sun
 # Create Datetime: 2026-07-09
-# Build: docker build -f Dockerfile --platform=linux/amd64 -t origin-hub-ai-registry.cn-shanghai.cr.aliyuncs.com/dataflow/model_proxy:v1.0.0 .
+# Build: docker build -f Dockerfile --platform=linux/amd64 -t origin-hub-ai-registry.cn-shanghai.cr.aliyuncs.com/dataflow/model_proxy:v1.1.1 .
 FROM library/python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
