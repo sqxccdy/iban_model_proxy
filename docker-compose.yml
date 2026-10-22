@@ -16,6 +16,7 @@ services:
 
   model_proxy:
     image: origin-hub-ai-registry.cn-shanghai.cr.aliyuncs.com/dataflow/model_proxy:v1.1.1
+    ports:
       - 8000:8000
     container_name: model_proxy
     hostname: model_proxy
