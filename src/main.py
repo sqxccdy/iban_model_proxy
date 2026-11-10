@@ -376,15 +376,17 @@ async def proxy_json_request(request, upstream_path: str):
             upstream_req["stream_options"] = stream_options
             stream_options.setdefault("include_usage", True)
     if route["extra_params"]:
-        upstream_req["extra_body"] = route["extra_params"]
+        upstream_req.update(route["extra_params"])
 
     session = request.app["client_session"]
     upstream_start_ts = time.monotonic()
+    print(upstream_req)
     try:
         async with session.post(
                 f"{route['base_url']}{upstream_path}",
                 headers={"Authorization": f"Bearer {route['api_key']}", "Content-Type": "application/json"},
                 json=upstream_req,
+                ssl=False,
                 timeout=ClientTimeout(total=300)
         ) as resp:
             if resp.status != 200:
@@ -476,6 +478,8 @@ async def proxy_json_request(request, upstream_path: str):
             stage="proxy_exception",
             status=500,
         )
+        import traceback
+        traceback.print_exc()
         record_stats(request, success=False)
         return web.json_response({"error": "Internal error"}, status=500)
     finally:
